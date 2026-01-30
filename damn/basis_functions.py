@@ -1,4 +1,5 @@
 import numpy as np
+from .alignment import construct_timebins
 
 '''Bases functions and other tools for building GLM design matrices.'''
 
@@ -25,7 +26,7 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
         Raised cosine basis matrix.
     """
     # Time axis
-    t = np.arange(-pre_s, post_s+binwidth_s, binwidth_s) # inclusive end
+    t, edges,_ = construct_timebins(pre_s, post_s, binwidth_s)
     T = len(t)
 
     if log_scale:
@@ -57,7 +58,7 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
             basis[:, k] = 0.5 * (1 + np.cos(np.clip(x, -np.pi, np.pi)))
             basis[np.abs(x) >= np.pi, k] = 0.0
 
-    return basis
+    return basis,t
 
 def delta_basis(pre_s, post_s, binwidth_s):
     """
@@ -82,14 +83,14 @@ def delta_basis(pre_s, post_s, binwidth_s):
         Time vector spanning [-pre_seconds, post_seconds].
     """
     # Time axis
-    t = np.arange(-pre_s, post_s+binwidth_s, binwidth_s) # inclusive end
+    t = construct_timebins(pre_s, post_s, binwidth_s)[0]
     T = len(t)
 
     # Delta basis = identity matrix
     basis = np.eye(T)
     # flip the basis so the first index is earliest in time
 
-    return basis
+    return basis, t
 
 # TODO: Bspline
 
