@@ -16,8 +16,6 @@ def generate_aligned_bases(
                            basis_time=None,
                            silent=True,
                            **basis_kwargs):
-    # TODO: accept a list of basis functions to allow for multiple basis types?
-
     """
     Generate event-aligned basis projections for a GLM design matrix.
 
@@ -76,7 +74,7 @@ def generate_aligned_bases(
     basis_t0_index = np.searchsorted(basis_time, 0.0) # where in the basis the event time falls
 
     # compute the trial timespans based on master alignment times, and pre_s and post_s
-    # TODO: handle variable trial lengths
+    # TODO: handle variable trial lengths here
     trial_times = [construct_timebins(master_pre_s, master_post_s, binwidth_s)[0] + m for m in master_alignment_times]
     trial_timespans = np.stack([(t[0], t[-1]) for t in trial_times])
     trial_t0_indices = np.round((master_alignment_times - trial_timespans[:, 0]) / binwidth_s).astype(int)
@@ -84,12 +82,10 @@ def generate_aligned_bases(
     assert np.unique(n_bins_per_trial).size == 1, "All trials must have the same number of bins for now. though the code should work for variable lengths..."
 
     # Allocate an empty design matrix
-    #X_full = [np.zeros((nbins, n_basis)) for nbins in n_bins_per_trial]
     X_full = np.vstack([np.zeros((nbins, n_basis)) for nbins in n_bins_per_trial])
 
     for i, (t0, val) in enumerate(zip(event_times, basis_scaling_vals)):
         # TODO: allow passing trial start and stop times instead of pre_s and post_s? For uneven trial lengths
-        # TODO: handle single trial case
         if np.isnan(t0) or np.isnan(val) or (val == 0):
             continue
         # find the start time and end time of the kernel in absolute time
