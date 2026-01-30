@@ -1,0 +1,100 @@
+import numpy as np
+
+'''Bases functions and other tools for building GLM design matrices.'''
+
+def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
+    """
+    Construct a raised cosine basis over time.
+
+    Parameters
+    ----------
+    n_basis_funcs : int
+        Number of basis functions.
+    pre_seconds : float
+        Time before zero (positive value).
+    post_seconds : float
+        Time after zero.
+    binwidth : float
+        Width of time bins in seconds.
+    log_scale : bool, default False
+        If True, basis centers are spaced logarithmically (compressed near zero).
+
+    Returns
+    -------
+    basis : ndarray, shape (T, n_basis_funcs)
+        Raised cosine basis matrix.
+    """
+    # Time axis
+    t = np.arange(-pre_s, post_s+binwidth_s, binwidth_s) # inclusive end
+    T = len(t)
+
+    if log_scale:
+        # TODO: verify this log spacing is correct
+        # Shift time to be strictly positive for log
+        eps = binwidth_s
+        t_pos = t + pre_s + eps
+
+        # Log-time
+        log_t = np.log(t_pos)
+
+        centers = np.linspace(log_t.min(), log_t.max(), n_funcs)
+        width = centers[1] - centers[0]
+
+        basis = np.zeros((T, n_funcs))
+        for k, c in enumerate(centers):
+            x = (log_t - c) * np.pi / width
+            basis[:, k] = 0.5 * (1 + np.cos(np.clip(x, -np.pi, np.pi)))
+            basis[np.abs(x) >= np.pi, k] = 0.0
+
+    else:
+        # Linear spacing
+        centers = np.linspace(t[0], t[-1], n_funcs)
+        width = centers[1] - centers[0]
+
+        basis = np.zeros((T, n_funcs))
+        for k, c in enumerate(centers):
+            x = (t - c) * np.pi / width
+            basis[:, k] = 0.5 * (1 + np.cos(np.clip(x, -np.pi, np.pi)))
+            basis[np.abs(x) >= np.pi, k] = 0.0
+
+    return basis
+
+def delta_basis(pre_s, post_s, binwidth_s):
+    """
+    Construct a delta (impulse) basis over time.
+
+    Each basis function is 1 at a single time bin and 0 elsewhere.
+
+    Parameters
+    ----------
+    pre_seconds : float
+        Time before zero (positive value).
+    post_seconds : float
+        Time after zero.
+    binwidth_s : float
+        Width of time bins in seconds.
+
+    Returns
+    -------
+    basis : ndarray, shape (T, T)
+        Delta basis matrix (identity).
+    t : ndarray, shape (T,)
+        Time vector spanning [-pre_seconds, post_seconds].
+    """
+    # Time axis
+    t = np.arange(-pre_s, post_s+binwidth_s, binwidth_s) # inclusive end
+    T = len(t)
+
+    # Delta basis = identity matrix
+    basis = np.eye(T)
+    # flip the basis so the first index is earliest in time
+
+    return basis
+
+# TODO: Bspline
+
+basis_functions = dict(
+    raised_cosine=raised_cosine_basis,
+    delta=delta_basis,
+)
+
