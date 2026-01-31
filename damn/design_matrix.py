@@ -85,6 +85,16 @@ def generate_aligned_bases(
     trial_t0_indices = np.round(
         (master_alignment_times - trial_timespans[:, 0]) / binwidth_s
     ).astype(int)
+    # warn the user if there is overlap in the trial timespans
+    overlaps = np.where(
+        trial_timespans[:-1, 1] > trial_timespans[1:, 0]
+    )[0]
+    if len(overlaps) > 0:
+        print(
+            f"Warning: Overlapping trial timespans detected between trials "
+            f"{overlaps} and {overlaps + 1}. Check your master alignment times "
+            "and pre/post seconds."
+        )
 
     n_bins_per_trial = np.array([len(t) for t in trial_times])
     assert np.unique(n_bins_per_trial).size == 1, (
@@ -111,7 +121,7 @@ def generate_aligned_bases(
             continue
 
         # find the start time and end time of the kernel in absolute time
-        basis_start_time = t0 - basis_time[0]
+        basis_start_time = t0 + basis_time[0]
         basis_end_time = t0 + basis_time[-1]
 
         # find which trials the kernel falls inside of, using the trial_timespans

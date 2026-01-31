@@ -31,6 +31,7 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
 
     if log_scale:
         # TODO: verify this log spacing is correct
+        # TODO: reverse function for going backwards in time
         # Shift time to be strictly positive for log
         eps = binwidth_s
         t_pos = t + pre_s + eps
