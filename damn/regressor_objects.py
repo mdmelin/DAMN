@@ -212,11 +212,8 @@ class DesignMatrix:
         self.regressors = {}
 
     def add_regressor(self, regressor):
-        if isinstance(regressor, (EventRegressor, ContinuousRegressor)):
-            self.regressors[regressor.name] = regressor
-        elif isinstance(regressor, str):
             # TODO: add by name and specify the type (Event or Continuous) and parameters (including basis functions)
-            raise NotImplementedError("Adding regressor by name is not implemented yet.")
+            self.regressors[regressor.name] = regressor
 
     def build(self, Y=None):
         for reg in self.regressors.values():
