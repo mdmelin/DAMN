@@ -98,4 +98,3 @@ basis_functions = dict(
     raised_cosine=raised_cosine_basis,
     delta=delta_basis,
 )
-
