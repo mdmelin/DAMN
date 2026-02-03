@@ -3,6 +3,11 @@ from .alignment import construct_timebins
 
 '''Bases functions and other tools for building GLM design matrices.'''
 
+def no_basis():
+    # No basis function, just return a single delta function at time zero
+    return np.ones([1,1]), np.zeros((1,))
+    
+
 def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
     """
     Construct a raised cosine basis over time.
@@ -97,9 +102,51 @@ def delta_basis(pre_s, post_s, binwidth_s):
 
     return basis, t
 
-# TODO: Bspline
+def bspline_basis(n_funcs, pre_s, post_s, binwidth_s, degree=3):
+    """
+    Construct a B-spline basis over time.
+
+    Parameters
+    ----------
+    n_basis_funcs : int
+        Number of basis functions.
+    pre_seconds : float
+        Time before zero (positive value).
+    post_seconds : float
+        Time after zero.
+    binwidth : float
+        Width of time bins in seconds.
+    degree : int, default 3
+        Degree of the B-splines.
+
+    Returns
+    -------
+    basis : ndarray, shape (T, n_basis_funcs)
+        B-spline basis matrix.
+    """
+    from scipy.interpolate import BSpline, make_interp_spline
+
+    # Time axis
+    t, edges,_ = construct_timebins(pre_s, post_s, binwidth_s)
+    T = len(t)
+
+    # Knot vector
+    n_knots = n_funcs + degree + 1
+    knots = np.linspace(t[0], t[-1], n_knots - 2 * degree)
+    knots = np.concatenate(([t[0]] * degree, knots, [t[-1]] * degree))
+
+    basis = np.zeros((T, n_funcs))
+    for i in range(n_funcs):
+        coeffs = np.zeros(n_funcs)
+        coeffs[i] = 1
+        spline = BSpline(knots, coeffs, degree)
+        basis[:, i] = spline(t)
+
+    return basis, t
 
 basis_functions = dict(
     raised_cosine=raised_cosine_basis,
     delta=delta_basis,
+    bspline=bspline_basis,
+    no_basis=no_basis,
 )
