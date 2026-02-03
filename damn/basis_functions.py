@@ -30,9 +30,10 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
     T = len(t)
 
     if log_scale:
-        # TODO: verify this log spacing is correct
-        # TODO: reverse function for going backwards in time
-        # Shift time to be strictly positive for log
+        if pre_s > 0 and post_s > 0:
+            # warn the user that this is probably a bad idea
+            raise ValueError("Log-scale basis with both pre and post times > 0 is not supported.")
+            
         eps = binwidth_s
         t_pos = t + pre_s + eps
 
@@ -47,6 +48,9 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
             x = (log_t - c) * np.pi / width
             basis[:, k] = 0.5 * (1 + np.cos(np.clip(x, -np.pi, np.pi)))
             basis[np.abs(x) >= np.pi, k] = 0.0
+        if pre_s > 0:
+            print('Reversing log-scale basis functions for pre-zero times.')
+            basis = basis[::-1, :]
 
     else:
         # Linear spacing
