@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from abc import ABC, abstractmethod
 from .basis_functions import raised_cosine_basis, delta_basis
@@ -16,6 +17,12 @@ for that regressor.
 # =========================
 
 class BasisFunction(ABC):
+    '''
+    An abstract base class to handle basis functions that are employed by the Regressor objects.
+    Importantly, we don't store anything about the design matrix, or the coefficients for a particular basis function.
+    This is because the same basis function can be provided to multiple Regressors, while allowing each Regressor to have
+    its own set of coefficients for that basis function.
+    '''
     def __init__(self, pre_s, post_s, binwidth_s):
         self.pre_s = pre_s
         self.post_s = post_s
@@ -26,6 +33,16 @@ class BasisFunction(ABC):
     @abstractmethod
     def construct_basis(self):
         pass
+
+    def reconstruct_kernel(self, coeffs):
+        if len(coeffs) != self.basis.shape[1]:
+            raise ValueError(
+                f"Coefficient length {len(coeffs)} does not match "
+                f"number of basis functions {self.basis.shape[1]}"
+            )
+
+        kernel = self.basis @ coeffs
+        return kernel, self.basis_time
 
     def __getitem__(self, key):
         return self.basis[key]
@@ -102,6 +119,8 @@ class EventRegressor:
 
         self._X_blocks = None    # list of (T x K_i) arrays
         self.X = None            # dense cached matrix
+        self._basis_col_ranges = None   # cached after build
+        self._coefficients = None  # internal storage
 
         if event_values is None:
             self.event_values = np.ones_like(event_times)
@@ -116,7 +135,10 @@ class EventRegressor:
 
     def add_basis_function(self, basis_function,
                            pre_s=None, post_s=None, **kwargs):
-        if isinstance(basis_function, BasisFunction):
+        if self.X is not None:
+            raise RuntimeError("Cannot add basis functions after build()")
+
+        if _is_basis_function_like(basis_function):
             self.basis_functions.append(basis_function)
 
         elif isinstance(basis_function, str):
@@ -141,8 +163,9 @@ class EventRegressor:
                 )
             )
 
-    def build(self, master_alignment_times,
+    def build_regressor(self, master_alignment_times,
               master_pre_s, master_post_s):
+        # TODO: add option to shuffle this regressor
 
         aligned_bases = []
 
@@ -161,9 +184,101 @@ class EventRegressor:
 
         self._X_blocks = aligned_bases
         self.X = np.hstack(self._X_blocks)
+        
+        # cache column ranges once
+        self._basis_col_ranges = self._compute_basis_col_ranges()
 
         return self.X
+    
+    def _compute_basis_col_ranges(self):
+        ranges = []
+        col_start = 0
+        for basis in self.basis_functions:
+            n_cols = basis.basis.shape[1]
+            col_end = col_start + n_cols
+            ranges.append((col_start, col_end))
+            col_start = col_end
+        return ranges
 
+    def _set_regressor_coefficients(self, coeffs):
+        coeffs = np.asarray(coeffs)
+
+        if coeffs.ndim != 2:
+            raise ValueError(
+                "Coefficients must be 2D with shape (K, N). "
+                "Use (K, 1) for a single neuron."
+            )
+
+        if coeffs.shape[0] != self.n_cols:
+            raise ValueError(
+                f"Expected {self.n_cols} rows of coefficients, got {coeffs.shape[0]}"
+            )
+
+        self._coefficients = coeffs
+    
+    @property
+    def coefficients(self):
+        return self._coefficients
+
+    @coefficients.setter
+    def coefficients(self, coeffs):
+        self._set_regressor_coefficients(coeffs)
+
+    def reconstruct_kernel(self, coeffs=None, link_function=None, bias=None):
+        # TODO: support picking only particular neurons
+        """
+        Reconstruct kernel from 2D coefficients.
+
+        coeffs shape: (K, N)
+        returns: kernel (T, N), time (T,)
+        """
+        if coeffs is None:
+            if self._coefficients is None:
+                raise RuntimeError("No coefficients provided or stored")
+            coeffs = self._coefficients
+
+        coeffs = np.asarray(coeffs)
+
+        if coeffs.ndim == 1:
+            coeffs = coeffs[:, None]
+            
+
+        col_ranges = self._basis_col_ranges
+        kernels, times = [], []
+
+        for i, basis in enumerate(self.basis_functions):
+            c0, c1 = col_ranges[i]
+            basis_coeffs = coeffs[c0:c1, :]     # (K_i, N)
+            kernel, kernel_time = basis.reconstruct_kernel(basis_coeffs)
+            # kernel: (T_i, N)
+            kernels.append(kernel)
+            times.append(kernel_time)
+
+        # --- common time axis ---
+        min_time = min(t[0] for t in times)
+        max_time = max(t[-1] for t in times)
+        full_time = np.arange(
+            min_time, max_time + self.binwidth_s, self.binwidth_s
+        )
+
+        T = len(full_time)
+        N = coeffs.shape[1]
+        full_kernel = np.zeros((T, N))
+
+        for kernel, t in zip(kernels, times):
+            shift = np.searchsorted(full_time, t[0])
+            full_kernel[shift:shift + kernel.shape[0], :] += kernel
+
+        if link_function is not None:
+            if bias is None:
+                raise ValueError("Bias must be provided with link_function")
+            bias = np.asarray(bias)
+            if bias.ndim == 1:
+                bias = bias[None, :]
+            full_kernel = link_function(full_kernel + bias)
+
+        return full_kernel, full_time
+            
     @property
     def basis_blocks(self):
         if self._X_blocks is None:
@@ -179,6 +294,66 @@ class EventRegressor:
         if self.X is None:
             raise RuntimeError("Regressor has not been built yet")
         return self.X.shape[1]
+    
+    def kernel_summary(self, norm="l2"):
+        """
+        Summarize norms of reconstructed kernels.
+
+        Returns
+        -------
+        summary : dict
+            {
+                "regressor": name,
+                "n_neurons": N,
+                "basis": [
+                    {
+                        "basis": str(basis),
+                        "n_cols": K_i,
+                        "norm": (N,)
+                    },
+                    ...
+                ],
+                "total_norm": (N,)
+            }
+        """
+        if self._coefficients is None:
+            raise RuntimeError("No coefficients stored")
+
+        coeffs = self._coefficients
+        N = coeffs.shape[1]
+
+        if norm == "l2":
+            norm_fn = lambda x: np.linalg.norm(x, axis=0)
+        elif norm == "l1":
+            norm_fn = lambda x: np.sum(np.abs(x), axis=0)
+        else:
+            raise ValueError(f"Unknown norm: {norm}")
+
+        basis_summaries = []
+
+        # --- basis-wise kernel norms ---
+        for basis, (c0, c1) in zip(self.basis_functions, self._basis_col_ranges):
+            basis_coeffs = coeffs[c0:c1, :]      # (K_i, N)
+            kernel, _ = basis.reconstruct_kernel(basis_coeffs)  # (T_i, N)
+
+            basis_summaries.append(
+                {
+                    "basis": str(basis),
+                    "n_cols": c1 - c0,
+                    "norm": norm_fn(kernel),
+                }
+            )
+
+        # --- full regressor kernel norm ---
+        full_kernel, _ = self.reconstruct_kernel()
+        total_norm = norm_fn(full_kernel)
+
+        return {
+            "regressor": self.name,
+            "n_neurons": N,
+            "basis": basis_summaries,
+            "total_norm": total_norm,
+        }
 
     def __getitem__(self, key):
         if self.X is None:
@@ -215,18 +390,54 @@ class DesignMatrix:
             # TODO: add by name and specify the type (Event or Continuous) and parameters (including basis functions)
             self.regressors[regressor.name] = regressor
 
-    def build(self, Y=None):
+    def build_matrix(self, Y=None):
+        # TODO: add option to shuffle particular regressors
         for reg in self.regressors.values():
-            reg.build(
+            reg.build_regressor(
                 self.master_alignment_times,
                 self.master_pre_s,
                 self.master_post_s,
             )
     
-    def insert_coefficients(self, coefficients):
-        # this should reach down into Regressors and create a list and an array of coefficients
-        pass 
+    def set_coefficients(self, coefficients):
+        coefficients = np.asarray(coefficients)
+
+        if coefficients.ndim != 2:
+            raise ValueError(
+                "DesignMatrix coefficients must be 2D with shape (K, N)"
+            )
+
+        total_cols = sum(reg.n_cols for reg in self.regressors.values())
+
+        if coefficients.shape[0] != total_cols:
+            raise ValueError(
+                f"Expected {total_cols} coefficient rows, got {coefficients.shape[0]}"
+            )
+
+        for name, (c0, c1) in self._regressor_col_ranges.items():
+            self.regressors[name].coefficients = coefficients[c0:c1, :]
     
+    @property
+    def coefficients(self):
+        return np.vstack([
+            reg.coefficients
+            for reg in self.regressors.values()
+        ])
+
+    @property
+    def regressor_coefficients(self):
+        return {
+            name: reg.coefficients
+            for name, reg in self.regressors.items()
+        }
+    
+    def reconstruct_kernel(self, regressor_name, **kwargs):
+        return self.regressors[regressor_name].reconstruct_kernel(**kwargs)
+    
+    def reconstruct_Yhat(self):
+        pass
+        
+
     def __getattr__(self, name):
         if name in self.regressors:
             return self.regressors[name]
@@ -282,3 +493,15 @@ class DesignMatrix:
     def X(self):
         # return a safe copy of the full design matrix
         return np.hstack([reg.X for reg in self.regressors.values()])
+    
+    def regressor_summary(self, individual_basis_functions=False):
+        summaries = {}
+        for name, reg in self.regressors.items():
+            summary = reg.kernel_summary()
+            if not individual_basis_functions:
+                # remove basis-wise details
+                summaries[name] = summary['total_norm']
+                continue
+            else:
+                summaries[name] = summary
+        return summaries
