@@ -267,7 +267,8 @@ class EventRegressor:
 
         for kernel, t in zip(kernels, times):
             shift = np.searchsorted(full_time, t[0])
-            full_kernel[shift:shift + kernel.shape[0], :] += kernel
+            end = min(shift + kernel.shape[0], full_kernel.shape[0]) # avoid off by 1 because of bin rounding
+            full_kernel[shift:end, :] += kernel[:end - shift, :]
 
         if link_function is not None:
             if bias is None:
@@ -369,10 +370,18 @@ class EventRegressor:
             string += f"\n  - {bf}"
         return string
 
-class ContinuousRegressor:
-    # TODO:
-    pass
-
+class ContinuousRegressor(EventRegressor):
+    def __init__(self, name, continuous_times, continuous_values,
+                 binwidth_s, basis_objects=None):
+        super().__init__(
+            name=name,
+            event_times=continuous_times,
+            binwidth_s=binwidth_s,
+            event_values=continuous_values,
+            basis_objects=basis_objects,
+        )
+    # TODO: should work like EventRegresssor but also store a continuous signal 
+    
 # =========================
 # Design matrix
 # =========================
