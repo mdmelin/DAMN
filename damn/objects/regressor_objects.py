@@ -79,6 +79,9 @@ class EventRegressor:
 
         aligned_bases = []
 
+        if len(self.basis_functions) == 0:
+            raise RuntimeError(f'No basis functions added for regressor "{self.name}"')
+
         for basis in self.basis_functions:
             aligned_basis, _, _ = generate_aligned_bases(
                 master_alignment_times=master_alignment_times,
@@ -311,8 +314,7 @@ class ContinuousRegressor(EventRegressor):
             
             
         resampled_values = resample_to_timebins(master_bin_times, self.sample_times, self.sample_values)
-        if self.zscore:
-            resampled_values = (resampled_values - np.nanmean(resampled_values, axis=0)) / np.nanstd(resampled_values, axis=0)
+
         self.event_times = master_bin_times
         self.event_values = resampled_values
 
@@ -320,6 +322,10 @@ class ContinuousRegressor(EventRegressor):
         #    self.basis_functions.append(NoBasis(pre_s=0, post_s=0, binwidth_s=None))
 
         self.X = super().build_regressor(master_alignment_times, master_pre_s, master_post_s)
+
+        if self.zscore:
+            self.X = (self.X - np.nanmean(self.X, axis=0)) / np.nanstd(self.X, axis=0)
+            self._X_blocks = [ (block - np.nanmean(block, axis=0)) / np.nanstd(block, axis=0) for block in self._X_blocks ]
         return self.X 
 
     def __str__(self):
