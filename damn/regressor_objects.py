@@ -13,7 +13,7 @@ for that regressor.
 
 
 # =========================
-# Basis functions
+# Basis function objects
 # =========================
 
 class BasisFunction(ABC):
@@ -58,11 +58,26 @@ class BasisFunction(ABC):
         pass
 
 class NoBasis(BasisFunction):
-    def __init__(self, pre_s, post_s, binwidth_s):
+    def __init__(self, pre_s=None, post_s=None, binwidth_s=None):
         super().__init__(pre_s=0, post_s=0, binwidth_s=None)
     
     def construct_basis(self):
         return no_basis()
+
+class BoxcarSmooth(BasisFunction):
+    def __init__(self, pre_s, post_s, binwidth_s):
+        super().__init__(pre_s, post_s, binwidth_s)
+
+    def construct_basis(self):
+        return boxcar_smooth(self.pre_s, self.post_s, self.binwidth_s)
+
+class GaussianSmooth(BasisFunction):
+    def __init__(self, pre_s, post_s, binwidth_s):
+        super().__init__(pre_s, post_s, binwidth_s)
+    
+    def construct_basis(self):
+        return gaussian_smooth(self.pre_s, self.post_s, self.binwidth_s)
+
 
 class DeltaBasis(BasisFunction):
     def __init__(self, pre_s, post_s, binwidth_s):
@@ -71,6 +86,33 @@ class DeltaBasis(BasisFunction):
     def construct_basis(self):
         return delta_basis(self.pre_s, self.post_s, self.binwidth_s)
 
+class FIRBasis(BasisFunction):
+    def __init__(self, impulse_binsize_s, pre_s, post_s, binwidth_s):
+        self.impulse_binsize_s = impulse_binsize_s
+        super().__init__(pre_s, post_s, binwidth_s)
+
+    def construct_basis(self):
+        return fir_basis(
+            self.impulse_binsize_s,
+            self.pre_s,
+            self.post_s,
+            self.binwidth_s,
+        )
+
+class GaussianBasis(BasisFunction):
+    def __init__(self, n_funcs, pre_s, post_s, binwidth_s, sigma=None):
+        self.n_funcs = n_funcs
+        self.sigma = sigma
+        super().__init__(pre_s, post_s, binwidth_s)
+
+    def construct_basis(self):
+        return gaussian_basis(
+            self.n_funcs,
+            self.pre_s,
+            self.post_s,
+            self.binwidth_s,
+            self.sigma,
+        )
 
 class RaisedCosineBasis(BasisFunction):
     def __init__(self, n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
@@ -120,6 +162,10 @@ basis_function_classes = {
     "delta": DeltaBasis,
     "raised_cosine": RaisedCosineBasis,
     "bspline" : BsplineBasis,
+    "gaussian_basis" : GaussianBasis,
+    "boxcar_smooth" : BoxcarSmooth,
+    "gaussian_smooth" : GaussianSmooth,
+    "fir" : FIRBasis,
 }
 
 def _is_basis_function_like(obj):
@@ -404,28 +450,24 @@ class ContinuousRegressor(EventRegressor):
     values to match the bins of the master data alignment
     '''
     def __init__(self, name, sample_times, sample_values,
-                 target_binwidth_s, zscore=True, tags=None):
-        self.name = name
+                 target_binwidth_s, zscore=True, basis_objects=None, tags=None,):
+        super().__init__(name, event_times=None, binwidth_s=target_binwidth_s,
+                 event_values=None, basis_objects=basis_objects, tags=tags)
+
+        # arbitrary times and values
         self.sample_times = sample_times
         self.sample_values = sample_values
-        self.binwidth_s = target_binwidth_s
+        # times and values aligned to the master design matrix (same as EventRegressor)
+        self.event_times = None # created during .build()
+        self.event_values = None # created during .build()
+
         self.zscore = zscore
-        if isinstance(tags, str):
-            self.tags = {tags}
-        else:
-            self.tags = set(tags or []) # for grouping regressors
 
-
-        self.basis_functions = []
-        self._X_blocks = None    # list of (T x K_i) arrays
-        self.X = None            # dense cached matrix
-        self._basis_col_ranges = None   # cached after build
-        self._coefficients = None  # internal storage
 
     def build_regressor(self, master_alignment_times,
               master_pre_s, master_post_s):
         from .alignment import generate_master_alignment_bin_times, resample_to_timebins
-        # TODO: add option to shuffle
+        # TODO: add option to shuffle, probably in EventRegressor
         master_bin_times = generate_master_alignment_bin_times(master_alignment_times,
                                                                master_pre_s,
                                                                master_post_s,
@@ -436,11 +478,13 @@ class ContinuousRegressor(EventRegressor):
         resampled_values = resample_to_timebins(master_bin_times, self.sample_times, self.sample_values)
         if self.zscore:
             resampled_values = (resampled_values - np.nanmean(resampled_values, axis=0)) / np.nanstd(resampled_values, axis=0)
-        self._X_blocks = resampled_values
-        self.X = resampled_values
-        self.basis_functions = [NoBasis(pre_s=0, post_s=0, binwidth_s=None)] # insert just the identity basis to reuse machinery from EventRegressor
-        # cache column ranges once
-        self._basis_col_ranges = self._compute_basis_col_ranges()
+        self.event_times = master_bin_times
+        self.event_values = resampled_values
+
+        #if len(self.basis_functions) == 0:
+        #    self.basis_functions.append(NoBasis(pre_s=0, post_s=0, binwidth_s=None))
+
+        self.X = super().build_regressor(master_alignment_times, master_pre_s, master_post_s)
         return self.X 
 
     def __str__(self):
@@ -452,6 +496,10 @@ class ContinuousRegressor(EventRegressor):
             string += f"\n  - {bf}"
         return string
         
+class SpatialRegressor(EventRegressor):
+    # TODO: also houses coordinates for where an event happened 
+    def __init__(self):
+        raise NotImplementedError()
 
 class CategoricalRegressor(EventRegressor):
     def __init__(self, name, event_times, categories,
@@ -489,9 +537,10 @@ class DesignMatrix:
                 )
             self.regressors[regressor.name] = regressor
 
-    def build_matrix(self, Y=None):
+    def build_matrix(self, Y=None,):
         # TODO: add option to shuffle particular regressors
         for reg in self.regressors.values():
+            print(f'Building regressor: "{reg.name}"')
             reg.build_regressor(
                 self.master_alignment_times,
                 self.master_pre_s,
