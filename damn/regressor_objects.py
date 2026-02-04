@@ -1,7 +1,7 @@
 import time
 import numpy as np
 from abc import ABC, abstractmethod
-from .basis_functions import raised_cosine_basis, delta_basis
+from .basis_functions import *
 from .alignment import construct_timebins
 from .design_matrix import generate_aligned_bases
 
@@ -57,6 +57,12 @@ class BasisFunction(ABC):
     def plot(self):
         pass
 
+class NoBasis(BasisFunction):
+    def __init__(self, pre_s, post_s, binwidth_s):
+        super().__init__(pre_s=0, post_s=0, binwidth_s=None)
+    
+    def construct_basis(self):
+        return no_basis()
 
 class DeltaBasis(BasisFunction):
     def __init__(self, pre_s, post_s, binwidth_s):
@@ -81,6 +87,22 @@ class RaisedCosineBasis(BasisFunction):
             self.log_scale,
         )
 
+class BsplineBasis(BasisFunction):
+    def __init__(self, n_funcs, pre_s, post_s, binwidth_s, degree=3):
+        self.n_funcs = n_funcs
+        self.degree = degree
+        super().__init__(pre_s, post_s, binwidth_s)
+        
+    def construct_basis(self):
+        return bspline_basis(
+            self.n_funcs,
+            self.pre_s,
+            self.post_s,
+            self.binwidth_s,
+            self.degree,
+        )
+        
+
 
 class CustomBasisFunction(BasisFunction):
     def __init__(self, basis_array, pre_s, post_s, binwidth_s):
@@ -94,10 +116,11 @@ class CustomBasisFunction(BasisFunction):
 
 
 basis_function_classes = {
+    "no_basis" : NoBasis,
     "delta": DeltaBasis,
     "raised_cosine": RaisedCosineBasis,
+    "bspline" : BsplineBasis,
 }
-
 
 def _is_basis_function_like(obj):
     return all(hasattr(obj, attr) for attr in ("construct_basis", "__getitem__"))
@@ -110,8 +133,13 @@ def _is_basis_function_like(obj):
 # TODO: can regressor types inherit from one object?
 class EventRegressor:
     def __init__(self, name, event_times, binwidth_s,
-                 event_values=None, basis_objects=None):
+                 event_values=None, basis_objects=None, tags=None):
         self.name = name
+        if isinstance(tags, str):
+            self.tags = {tags}
+        else:
+            self.tags = set(tags or []) # for grouping regressors
+
         self.event_times = event_times
         self.binwidth_s = binwidth_s
 
@@ -145,7 +173,7 @@ class EventRegressor:
             if basis_function not in basis_function_classes:
                 raise ValueError(f"Unknown basis function: {basis_function}")
 
-            assert pre_s is not None and post_s is not None
+            #assert pre_s is not None and post_s is not None
             basis_class = basis_function_classes[basis_function]
             self.basis_functions.append(
                 basis_class(
@@ -363,7 +391,7 @@ class EventRegressor:
 
     def __str__(self):
         string = (
-            f'Event Regressor: "{self.name}" '
+            f'Event Regressor: "{self.name}" of shape {self.X.shape} '
             f"with {len(self.basis_functions)} basis functions."
         )
         for bf in self.basis_functions:
@@ -371,16 +399,73 @@ class EventRegressor:
         return string
 
 class ContinuousRegressor(EventRegressor):
-    def __init__(self, name, continuous_times, continuous_values,
+    '''
+    Doesn't need any of the fancy machinery to work with basis functions, all we need to do is resample
+    values to match the bins of the master data alignment
+    '''
+    def __init__(self, name, sample_times, sample_values,
+                 target_binwidth_s, zscore=True, tags=None):
+        self.name = name
+        self.sample_times = sample_times
+        self.sample_values = sample_values
+        self.binwidth_s = target_binwidth_s
+        self.zscore = zscore
+        if isinstance(tags, str):
+            self.tags = {tags}
+        else:
+            self.tags = set(tags or []) # for grouping regressors
+
+
+        self.basis_functions = []
+        self._X_blocks = None    # list of (T x K_i) arrays
+        self.X = None            # dense cached matrix
+        self._basis_col_ranges = None   # cached after build
+        self._coefficients = None  # internal storage
+
+    def build_regressor(self, master_alignment_times,
+              master_pre_s, master_post_s):
+        from .alignment import generate_master_alignment_bin_times, resample_to_timebins
+        # TODO: add option to shuffle
+        master_bin_times = generate_master_alignment_bin_times(master_alignment_times,
+                                                               master_pre_s,
+                                                               master_post_s,
+                                                               self.binwidth_s)
+            
+            
+            
+        resampled_values = resample_to_timebins(master_bin_times, self.sample_times, self.sample_values)
+        if self.zscore:
+            resampled_values = (resampled_values - np.nanmean(resampled_values, axis=0)) / np.nanstd(resampled_values, axis=0)
+        self._X_blocks = resampled_values
+        self.X = resampled_values
+        self.basis_functions = [NoBasis(pre_s=0, post_s=0, binwidth_s=None)] # insert just the identity basis to reuse machinery from EventRegressor
+        # cache column ranges once
+        self._basis_col_ranges = self._compute_basis_col_ranges()
+        return self.X 
+
+    def __str__(self):
+        string = (
+            f'Continuous Regressor: "{self.name}" of shape {self.X.shape} '
+            f"with {len(self.basis_functions)} basis functions."
+        )
+        for bf in self.basis_functions:
+            string += f"\n  - {bf}"
+        return string
+        
+
+class CategoricalRegressor(EventRegressor):
+    def __init__(self, name, event_times, categories,
                  binwidth_s, basis_objects=None):
         super().__init__(
             name=name,
-            event_times=continuous_times,
+            event_times=event_times,
             binwidth_s=binwidth_s,
-            event_values=continuous_values,
+            event_values=None,
             basis_objects=basis_objects,
         )
-    # TODO: should work like EventRegresssor but also store a continuous signal 
+        self.categories = categories
+        raise NotImplementedError()
+    # TODO: should work like EventRegressor but construct 1hot encoding
     
 # =========================
 # Design matrix
@@ -397,6 +482,11 @@ class DesignMatrix:
 
     def add_regressor(self, regressor):
             # TODO: add by name and specify the type (Event or Continuous) and parameters (including basis functions)
+            # first check if overwriting an existing regressor
+            if regressor.name in self.regressors:
+                raise ValueError(
+                    f"Regressor with name {regressor.name} already exists"
+                )
             self.regressors[regressor.name] = regressor
 
     def build_matrix(self, Y=None):
@@ -459,7 +549,24 @@ class DesignMatrix:
         for reg in self.regressors.values():
             string += f"{reg}\n"
         return string
-
+    
+    def select(self, *, name=None, tag=None):
+        """
+        Select regressors by name or tag.
+    
+        Exactly one of {name, tag} must be provided.
+        """
+        if (name is None) == (tag is None):
+            raise ValueError("Provide exactly one of name or tag")
+    
+        if name is not None:
+            return self.regressors[name]
+    
+        return {
+            k: v for k, v in self.regressors.items()
+            if tag in v.tags
+        }
+    
     @property
     def _regressor_col_ranges(self):
         ranges = {}
@@ -503,14 +610,42 @@ class DesignMatrix:
         # return a safe copy of the full design matrix
         return np.hstack([reg.X for reg in self.regressors.values()])
     
-    def regressor_summary(self, individual_basis_functions=False):
+    def regressor_summary(self, *, tag=None, individual_basis_functions=False):
         summaries = {}
+
         for name, reg in self.regressors.items():
+            if tag is not None and tag not in reg.tags:
+                continue
+
             summary = reg.kernel_summary()
             if not individual_basis_functions:
-                # remove basis-wise details
-                summaries[name] = summary['total_norm']
-                continue
+                summaries[name] = summary["total_norm"]
             else:
                 summaries[name] = summary
+
         return summaries
+
+
+    ####### Working with tagged regressor groups #######
+
+    def columns_for_tag(self, tag):
+        cols = []
+        ranges = self._regressor_col_ranges
+
+        for name, reg in self.regressors.items():
+            if tag in getattr(reg, "tags", []):
+                start, end = ranges[name]
+                cols.extend(range(start, end))
+
+        return np.array(cols)
+    
+    def X_for_tag(self, tag):
+        cols = self.columns_for_tag(tag)
+        return self.X[:, cols]
+    
+    def coefficients_for_tag(self, tag):
+        betas = []
+        for reg in self.regressors.values():
+            if tag in reg.tags:
+                betas.append(reg.coefficients)
+        return np.vstack(betas)

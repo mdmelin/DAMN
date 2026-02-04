@@ -12,8 +12,23 @@ def construct_timebins(pre_seconds, post_seconds, binwidth_s):
     event_index = pre_event_timebin_centers.size # index of the alignment event in psth_matrix
     return timebin_centers, timebin_edges, event_index
 
+def generate_master_alignment_bin_times(master_alignment_times, master_pre_s, master_post_s, binwidth_s):
+    all_trial_bins = []
+    for t in master_alignment_times:
+        bins = construct_timebins(master_pre_s, master_post_s, binwidth_s)[0] + t
+        all_trial_bins.append(bins)
+    return np.concatenate(all_trial_bins)
+
+def resample_to_timebins(master_times, sample_times, sample_values):
+    # resample sample_values at sample_times to master_times using interpolation
+    # sample_values is n_samples x n_features
+    resampled_values = np.empty_like(master_times, shape=(master_times.size, sample_values.shape[1]))
+    for i in range(sample_values.shape[1]):
+        resampled_values[:,i] = np.interp(master_times, sample_times, sample_values[:,i], left=0, right=0)
+    return resampled_values
+
 '''
-Many of these functions are adopted from https://github.com/spkware/spks (Couto and Melin, 2025).
+Many of these functions below are adopted from https://github.com/spkware/spks (Couto and Melin, 2025).
 Please see this repo for the original implementations, and for many other related functions for working
 with spiking data.
 '''

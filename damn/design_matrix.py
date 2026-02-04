@@ -30,7 +30,6 @@ def _construct_basis(
 
     raise ValueError(f"Unknown basis specification: {basis}")
 
-
 def generate_aligned_bases(
     master_alignment_times,
     master_pre_s,
@@ -92,7 +91,7 @@ def generate_aligned_bases(
     if len(overlaps) > 0:
         print(
             f"Warning: Overlapping trial timespans detected between trials "
-            f"{overlaps} and {overlaps + 1}. Check your master alignment times "
+            f"Check your master alignment times "
             "and pre/post seconds."
         )
 
@@ -176,4 +175,4 @@ def generate_aligned_bases(
                 basis_matrix[basis_start_ind:basis_end_ind, :] * val
             )
 
-    return X_full, basis_time, basis_t0_index  # TODO: return trial timestamps or zero times?
+    return X_full, basis_time, basis_t0_index
