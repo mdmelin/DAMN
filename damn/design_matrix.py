@@ -114,6 +114,7 @@ def generate_aligned_bases(
     # ------------------------------------------------------------------
     # Insert events
     # ------------------------------------------------------------------
+    give_trial_overlap_warning = False
     for i, (t0, val) in enumerate(zip(event_times, basis_scaling_vals)):
         # TODO: allow passing trial start and stop times instead of pre_s and post_s? For uneven trial lengths
         if np.isnan(t0) or np.isnan(val) or (val == 0):
@@ -137,10 +138,7 @@ def generate_aligned_bases(
 
         # warn the user if the event spans multiple trials
         elif len(trials_to_insert) > 1:
-            print(
-                f"Warning: Event {i} spans multiple trials {trials_to_insert}, "
-                "double check your kernel size."
-            )
+            give_trial_overla_warning = True
 
         for trial_index in trials_to_insert:
             trial_start_ind = trial_row_offsets[trial_index]
@@ -174,5 +172,9 @@ def generate_aligned_bases(
             X_full[insert_start:insert_end, :] += (
                 basis_matrix[basis_start_ind:basis_end_ind, :] * val
             )
-
+    if give_trial_overlap_warning:
+        print(
+                f"Warning: Event kernels spans multiple trials,"
+                "double check your kernel size."
+            )
     return X_full, basis_time, basis_t0_index

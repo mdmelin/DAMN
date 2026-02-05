@@ -285,8 +285,10 @@ class EventRegressor:
 
 class ContinuousRegressor(EventRegressor):
     '''
-    Doesn't need any of the fancy machinery to work with basis functions, all we need to do is resample
-    values to match the bins of the master data alignment
+    Imlements additional functionality for continuous regressors:
+    - resampling to master design matrix timebins, so that a value exists for every point, even if data are nonuniformly sampled
+    - z-scoring 
+    - TODO: add option for thresholded event crossing
     '''
     def __init__(self, name, sample_times, sample_values,
                  target_binwidth_s, zscore=True, basis_objects=None, tags=None,):
@@ -295,6 +297,8 @@ class ContinuousRegressor(EventRegressor):
 
         # arbitrary times and values
         self.sample_times = sample_times
+        if np.ndim(sample_values) == 1:
+            sample_values = np.expand_dims(sample_values, 1)
         self.sample_values = sample_values
         # times and values aligned to the master design matrix (same as EventRegressor)
         self.event_times = None # created during .build()

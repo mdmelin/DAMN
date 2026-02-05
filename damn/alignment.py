@@ -5,8 +5,19 @@ from tqdm import tqdm
 from multiprocessing.pool import Pool,ThreadPool
 
 def construct_timebins(pre_seconds, post_seconds, binwidth_s):
-    pre_event_timebin_centers = -np.arange(0, pre_seconds, binwidth_s)[1:][::-1]
-    post_event_timebin_centers = np.arange(0, post_seconds, binwidth_s) 
+    if pre_seconds < 0 and post_seconds < 0:
+        raise ValueError('pre_seconds AND post_seconds cannot both be negative.')
+    if post_seconds < 0:
+        #print('WARNING: user has specified a basis that does not overlap with the event')
+        pre_event_timebin_centers = np.arange(-pre_seconds, post_seconds, binwidth_s)[1:]
+    else: 
+        pre_event_timebin_centers = -np.arange(0, pre_seconds, binwidth_s)[1:][::-1]
+    if pre_seconds < 0:
+        #print('WARNING: user has specified a basis that does not overlap with the event')
+        post_event_timebin_centers = np.arange(-pre_seconds, post_seconds, binwidth_s) 
+    else:
+        post_event_timebin_centers = np.arange(0, post_seconds, binwidth_s) 
+
     timebin_centers = np.append(pre_event_timebin_centers, post_event_timebin_centers)
     timebin_edges = np.append(timebin_centers - binwidth_s/2, timebin_centers[-1] + binwidth_s/2)
     event_index = pre_event_timebin_centers.size # index of the alignment event in psth_matrix
