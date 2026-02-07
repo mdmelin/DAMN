@@ -100,7 +100,10 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
     """
     # Time axis
     t, edges,_ = construct_timebins(pre_s, post_s, binwidth_s)
-    t0 = np.searchsorted(t, 0)  # Find the index of the time bin closest to zero
+    # compute the number of bins to shift from pre and post s, assuming the kernel is currently centered on t=0
+    kernelwidth = (post_s - pre_s) 
+    binshift = int(np.round(kernelwidth / binwidth_s))
+    
     T = len(t)
 
     if log_scale:
@@ -136,8 +139,8 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
             basis[:, k] = 0.5 * (1 + np.cos(np.clip(x, -np.pi, np.pi)))
             basis[np.abs(x) >= np.pi, k] = 0.0
 
-    # shifft and pad the basis based on the known index of time zero (t0)
-    basis = _shift_and_pad_basis(basis, shift_bins=-t0)
+    # shift and pad the basis based on the known index of time zero (t0)
+    basis = _shift_and_pad_basis(basis, shift_bins=binshift)
     return basis
 
 def gaussian_basis(n_funcs, pre_s, post_s, binwidth_s, sigma=None):
@@ -279,7 +282,7 @@ def _shift_and_pad_basis(basis, shift_bins):
     else:
         shifted_basis = basis
     return shifted_basis
-    
+
 
 def _make_morlet_wavelet(frequency, srate, n_cycles=7):
     """

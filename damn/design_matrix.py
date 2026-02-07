@@ -138,7 +138,7 @@ def generate_aligned_bases(
 
         # warn the user if the event spans multiple trials
         elif len(trials_to_insert) > 1:
-            give_trial_overla_warning = True
+            give_trial_overlap_warning = True
 
         for trial_index in trials_to_insert:
             trial_start_ind = trial_row_offsets[trial_index]

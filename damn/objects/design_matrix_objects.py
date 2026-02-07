@@ -142,6 +142,8 @@ class DesignMatrix:
     @property
     def X(self):
         # return a safe copy of the full design matrix
+        if not all(reg.X is not None for reg in self.regressors.values()):
+            raise ValueError("All regressors must be built before accessing X (run .build_matrix())")
         return np.hstack([reg.X for reg in self.regressors.values()])
     
     def regressor_summary(self, *, tag=None, individual_basis_functions=False):
