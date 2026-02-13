@@ -243,11 +243,17 @@ def radial_basis():
 #### Basis functions for periodic signals ####
 ##############################################
 
+def von_mises_basis():
+    raise NotImplementedError("Von Mises basis functions not implemented yet.")
+
 def morelet_wavelet_basis():
     raise NotImplementedError("Morlet wavelet basis not implemented yet.")
 
 def fourier_basis():
     raise NotImplementedError("Fourier basis functions not implemented yet.")
+
+def circular_spline_basis():
+    raise NotImplementedError("Circular spline basis functions not implemented yet.")
 
 #############################################
 ##### Spatial basis functions, used #########

@@ -28,9 +28,10 @@ class EventRegressor:
         self.basis_functions = []
 
         self._X_blocks = None    # list of (T x K_i) arrays
-        self.X = None            # dense cached matrix
+        self._X = None            # dense cached matrix
         self._basis_col_ranges = None   # cached after build
         self._coefficients = None  # internal storage
+        self._shuffle = False
 
         if event_values is None:
             self.event_values = np.ones_like(event_times)
@@ -96,12 +97,25 @@ class EventRegressor:
             aligned_bases.append(aligned_basis)
 
         self._X_blocks = aligned_bases
-        self.X = np.hstack(self._X_blocks)
+        self._X = np.hstack(self._X_blocks)
         
         # cache column ranges once
         self._basis_col_ranges = self._compute_basis_col_ranges()
 
-        return self.X
+        #return self._X
+    @property 
+    def X(self):
+        if self._X is None:
+            return None
+        # shuffle each column independently if enabled
+        if self._shuffle:
+            shuffled_X = self._X.copy()
+            for i in range(shuffled_X.shape[1]):
+                np.random.shuffle(shuffled_X[:, i])
+            return shuffled_X
+        else:
+            return self._X
+            
     
     def _compute_basis_col_ranges(self):
         ranges = []
@@ -193,6 +207,12 @@ class EventRegressor:
 
         return full_kernel, full_time
             
+    def enable_shuffle(self):
+        self._shuffle = True
+    
+    def disable_shuffle(self):
+        self._shuffle = False
+
     @property
     def basis_blocks(self):
         if self._X_blocks is None:
@@ -288,10 +308,11 @@ class ContinuousRegressor(EventRegressor):
     Imlements additional functionality for continuous regressors:
     - resampling to master design matrix timebins, so that a value exists for every point, even if data are nonuniformly sampled
     - z-scoring 
-    - TODO: add option for thresholded event crossing
+    - TODO: add option for thresholded event crossing?
     '''
     def __init__(self, name, sample_times, sample_values,
                  target_binwidth_s, zscore=True, basis_objects=None, tags=None,):
+
         super().__init__(name, event_times=None, binwidth_s=target_binwidth_s,
                  event_values=None, basis_objects=basis_objects, tags=tags)
 
@@ -303,9 +324,7 @@ class ContinuousRegressor(EventRegressor):
         # times and values aligned to the master design matrix (same as EventRegressor)
         self.event_times = None # created during .build()
         self.event_values = None # created during .build()
-
         self.zscore = zscore
-
 
     def build_regressor(self, master_alignment_times,
               master_pre_s, master_post_s):
@@ -325,12 +344,12 @@ class ContinuousRegressor(EventRegressor):
         #if len(self.basis_functions) == 0:
         #    self.basis_functions.append(NoBasis(pre_s=0, post_s=0, binwidth_s=None))
 
-        self.X = super().build_regressor(master_alignment_times, master_pre_s, master_post_s)
+        super().build_regressor(master_alignment_times, master_pre_s, master_post_s)
 
+        # otionally, z-score the continuous regressors
         if self.zscore:
-            self.X = (self.X - np.nanmean(self.X, axis=0)) / np.nanstd(self.X, axis=0)
+            self._X = (self._X - np.nanmean(self._X, axis=0)) / np.nanstd(self._X, axis=0)
             self._X_blocks = [ (block - np.nanmean(block, axis=0)) / np.nanstd(block, axis=0) for block in self._X_blocks ]
-        return self.X 
 
     def __str__(self):
         string = (

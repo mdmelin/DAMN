@@ -144,6 +144,16 @@ class DesignMatrix:
         # return a safe copy of the full design matrix
         return np.hstack([reg.X for reg in self.regressors.values()])
     
+    def shuffle_all(self):
+        for reg in self.regressors.values():
+            reg.enable_shuffle()
+    
+    def unshuffle_all(self):
+        for reg in self.regressors.values():
+            reg.disable_shuffle()
+    
+
+    
     def regressor_summary(self, *, tag=None, individual_basis_functions=False):
         summaries = {}
 
@@ -158,7 +168,6 @@ class DesignMatrix:
                 summaries[name] = summary
 
         return summaries
-
 
     ####### Working with tagged regressor groups #######
 
@@ -183,3 +192,22 @@ class DesignMatrix:
             if tag in reg.tags:
                 betas.append(reg.coefficients)
         return np.vstack(betas)
+
+    def set_shuffle_tags(self, tags,):
+        """
+        Mark all regressors with the given tag(s) to be shuffled.
+
+        Parameters
+        ----------
+        tags : str or list[str]
+            Tag(s) identifying which regressors to shuffle.
+        shuffle : bool
+            Whether to turn shuffling on or off.
+        """
+        if isinstance(tags, str):
+            tags = [tags]
+        tags = set(tags)
+
+        for reg in self.regressors.values():
+            if reg.tags & tags:  # any overlap
+                reg.enable_shuffle()
