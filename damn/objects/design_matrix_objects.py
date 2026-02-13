@@ -193,7 +193,7 @@ class DesignMatrix:
                 betas.append(reg.coefficients)
         return np.vstack(betas)
 
-    def set_shuffle_tags(self, tags,):
+    def set_shuffle_tags(self, tags, shuffle):
         """
         Mark all regressors with the given tag(s) to be shuffled.
 
@@ -210,4 +210,10 @@ class DesignMatrix:
 
         for reg in self.regressors.values():
             if reg.tags & tags:  # any overlap
-                reg.enable_shuffle()
+                if shuffle:
+                    reg.enable_shuffle()
+                else:
+                    reg.disable_shuffle()
+
+                    
+                    

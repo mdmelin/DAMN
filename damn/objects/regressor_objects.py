@@ -208,9 +208,11 @@ class EventRegressor:
         return full_kernel, full_time
             
     def enable_shuffle(self):
+        print(f'Enabling shuffle for regressor "{self.name}"')
         self._shuffle = True
     
     def disable_shuffle(self):
+        print(f'Disabling shuffle for regressor "{self.name}"')
         self._shuffle = False
 
     @property
