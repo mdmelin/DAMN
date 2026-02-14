@@ -11,220 +11,275 @@ This minimized the number of LBFGS iterations, which can be very slow when memor
 
 Author: Max Melin, 2025
 """
-
-import torch
+import torch 
 import numpy as np
 
 def fit_poisson_glm_torch(
     X,
     Y,
     alpha=None,
-    optimizer_type="lbfgs",      # "adam" or "lbfgs"
-    lr=1e-3,
-    max_epochs=100,
-    device=None,
-    print_every=5,
+    optimizer_type="lbfgs",
+    lr=1e-3, # only applies for Adam
+    batch_size=2092, # only applies for Adam
+    max_epochs=500,
+    val_fraction=0.0, # create a validation split if >0
     early_stopping=False,
+    print_every=1,
     patience=10,
     tol=1e-4,
-    val_fraction=0.0,           # fraction of data for internal validation
     seed=None,
-    batch_size=None             # minibatch size for Adam
+    device=None,
+    eval_batch_size=None,
 ):
-    """
-    Fit a multi-neuron Poisson GLM using PyTorch.
 
-    Supports both Adam (minibatch) and LBFGS (full-batch) optimizers, optional internal 
-    validation, early stopping, and returns training history.
+    import torch
+    import numpy as np
 
-    Args:
-        X (np.ndarray or torch.Tensor): Design matrix, shape (T, p)
-        Y (np.ndarray or torch.Tensor): Response matrix, shape (T, N)
-        alpha (float, optional): L2 regularization weight. Defaults to 0.
-        optimizer_type (str): "adam" or "lbfgs". Defaults to "lbfgs".
-        lr (float): Learning rate for Adam optimizer. Ignored for LBFGS. Defaults to 1e-3.
-        max_epochs (int): Maximum number of training epochs. Defaults to 100.
-        device (str or torch.device): "cpu" or "cuda". Defaults to auto-detect.
-        print_every (int): Print training progress every N epochs. Defaults to 5.
-        early_stopping (bool): Enable early stopping. Defaults to False.
-        patience (int): Number of epochs to wait for improvement before stopping. Defaults to 10.
-        tol (float): Minimum loss improvement to reset patience. Defaults to 1e-4.
-        val_fraction (float): Fraction of data to hold out for validation. Defaults to 0.0.
-        seed (int, optional): Random seed for reproducibility.
-        batch_size (int, optional): Mini-batch size for Adam. Ignored for LBFGS.
-
-    Returns:
-        W (np.ndarray): Learned weights, shape (p, N)
-        b (np.ndarray): Learned biases, shape (N,)
-        train_loss_hist (list[float]): Training loss history per epoch
-        val_loss_hist (list[float]): Validation loss history per epoch
-        train_bps_hist (list[float]): Training bits/spike history per epoch
-        val_bps_hist (list[float]): Validation bits/spike history per epoch
-    """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if alpha is None:
         alpha = 0
     if device == "cuda":
-        # free GPU memory before starting
         torch.cuda.empty_cache()
 
-    # ---- Optional internal validation split ----
+    # --------------------------------------------------
+    # Validation split
+    # --------------------------------------------------
+    rng = np.random.default_rng(seed)
+    T = X.shape[0]
+    idx = np.arange(T)
+    rng.shuffle(idx)
+
     if val_fraction > 0:
-        rng = np.random.default_rng(seed)
-        T = X.shape[0]
-        idx = np.arange(T)
-        rng.shuffle(idx)
         split = int(T * (1 - val_fraction))
-        train_idx = idx[:split]
-        val_idx = idx[split:]
-        X_train, Y_train = X[train_idx], Y[train_idx]
-        X_val, Y_val = X[val_idx], Y[val_idx]
+        train_idx, val_idx = idx[:split], idx[split:]
+        X_train_cpu, Y_train_cpu = X[train_idx], Y[train_idx]
+        X_val_cpu, Y_val_cpu = X[val_idx], Y[val_idx]
+        has_val = True
     else:
-        X_train, Y_train = X, Y
-        X_val, Y_val = None, None
+        X_train_cpu, Y_train_cpu = X, Y
+        X_val_cpu, Y_val_cpu = None, None
+        has_val = False
 
-    # ---- Move to torch ----
-    X_train = torch.tensor(X_train, dtype=torch.float32, device=device)
-    Y_train = torch.tensor(Y_train, dtype=torch.float32, device=device)
-    if X_val is not None:
-        X_val = torch.tensor(X_val, dtype=torch.float32, device=device)
-        Y_val = torch.tensor(Y_val, dtype=torch.float32, device=device)
+    X_train_cpu = torch.as_tensor(X_train_cpu, dtype=torch.float32)
+    Y_train_cpu = torch.as_tensor(Y_train_cpu, dtype=torch.float32)
 
-    T, p = X_train.shape
-    N = Y_train.shape[1]
+    if has_val:
+        X_val_cpu = torch.as_tensor(X_val_cpu, dtype=torch.float32)
+        Y_val_cpu = torch.as_tensor(Y_val_cpu, dtype=torch.float32)
 
+    T_train, p = X_train_cpu.shape
+    N = Y_train_cpu.shape[1]
+
+    # --------------------------------------------------
+    # Parameters
+    # --------------------------------------------------
     W = torch.zeros(p, N, device=device, requires_grad=True)
     b = torch.zeros(N, device=device, requires_grad=True)
 
     log2 = torch.log(torch.tensor(2.0, device=device))
     eps = 1e-12
 
-    # ---- Optimizer ----
-    if optimizer_type.lower() == "adam":
+    optimizer_type = optimizer_type.lower()
+
+    if optimizer_type == "adam":
         optimizer = torch.optim.Adam([W, b], lr=lr)
         use_minibatch = batch_size is not None
-    elif optimizer_type.lower() == "lbfgs":
-        if batch_size is not None:
-            print("Warning: LBFGS ignores batch_size and is always full-batch")
-        print("Using LBFGS optimizer (full-batch). Will ignore learning rate and batch size.")
+    elif optimizer_type == "lbfgs":
         optimizer = torch.optim.LBFGS([W, b], max_iter=20, line_search_fn="strong_wolfe")
         use_minibatch = False
     else:
         raise ValueError("optimizer_type must be 'adam' or 'lbfgs'")
 
-    # ---- History ----
-    train_loss_hist = []
-    val_loss_hist = []
-    train_bps_hist = []
-    val_bps_hist = []
+    # --------------------------------------------------
+    # Move full dataset ONCE if full-batch
+    # --------------------------------------------------
+    if not use_minibatch:
+        X_train = X_train_cpu.to(device)
+        Y_train = Y_train_cpu.to(device)
+        if has_val:
+            X_val = X_val_cpu.to(device)
+            Y_val = Y_val_cpu.to(device)
+
+    if eval_batch_size is None:
+        eval_batch_size = batch_size if batch_size is not None else T_train
+
+    train_loss_hist, val_loss_hist = [], []
+    train_bps_hist, val_bps_hist = [], []
 
     best_val_loss = float("inf")
     epochs_no_improve = 0
-    has_val = X_val is not None
 
+    # --------------------------------------------------
+    # Helper: streamed evaluation
+    # --------------------------------------------------
+    def evaluate_streamed(X_cpu, Y_cpu):
+        logL_model = 0.0
+        logL_null = 0.0
+        total_spikes = 0.0
+        total_loss = 0.0
+
+        mean_rate = torch.mean(Y_cpu, dim=0, keepdim=True).to(device)
+
+        for start in range(0, X_cpu.shape[0], eval_batch_size):
+            end = min(start + eval_batch_size, X_cpu.shape[0])
+            Xb = X_cpu[start:end].to(device, non_blocking=True)
+            Yb = Y_cpu[start:end].to(device, non_blocking=True)
+
+            eta = torch.clamp(Xb @ W + b, max=20)
+
+            exp_eta = torch.exp(eta)
+
+            total_loss += torch.sum(exp_eta - Yb * eta)
+            logL_model += torch.sum(Yb * eta - exp_eta)
+            logL_null += torch.sum(Yb * torch.log(mean_rate + eps) - mean_rate)
+            total_spikes += torch.sum(Yb)
+
+            del Xb, Yb, eta, exp_eta
+
+        total_loss += alpha * torch.sum(W**2)
+
+        bps = (logL_model - logL_null) / (total_spikes * log2)
+
+        return total_loss, bps
+    
+    def evaluate_full_gpu(X, Y):
+        with torch.no_grad():
+            eta = torch.clamp(X @ W + b, max=20)
+            exp_eta = torch.exp(eta)
+            loss = torch.sum(exp_eta - Y * eta) + alpha * torch.sum(W**2)
+
+            mean_rate = torch.mean(Y, dim=0, keepdim=True)
+            logL_model = torch.sum(Y * eta - exp_eta)
+            logL_null = torch.sum(Y * torch.log(mean_rate + eps) - mean_rate)
+
+            bps = (logL_model - logL_null) / (torch.sum(Y) * log2)
+
+        return loss, bps
+
+    # --------------------------------------------------
+    # Training loop
+    # --------------------------------------------------
     for epoch in range(max_epochs):
+        # ------------------------------
+        # Adam minibatch training
+        # ------------------------------
+        if optimizer_type == "adam" and use_minibatch:
 
-        if optimizer_type.lower() == "adam" and use_minibatch:
-            # Shuffle for minibatches
-            idx = torch.randperm(T, device=device)
-            for start in range(0, T, batch_size):
-                end = min(start + batch_size, T)
-                batch_idx = idx[start:end]
-                X_batch = X_train[batch_idx]
-                Y_batch = Y_train[batch_idx]
+            perm = torch.randperm(T_train)
 
-                optimizer.zero_grad()
+            for start in range(0, T_train, batch_size):
+                end = min(start + batch_size, T_train)
+                batch_idx = perm[start:end]
+
+                X_batch = X_train_cpu[batch_idx].to(device, non_blocking=True)
+                Y_batch = Y_train_cpu[batch_idx].to(device, non_blocking=True)
+
+                optimizer.zero_grad(set_to_none=True)
+
                 eta = torch.clamp(X_batch @ W + b, max=20)
-                rate = torch.exp(eta)
-                nll = torch.sum(rate - Y_batch * eta)
-                l2 = alpha * torch.sum(W**2)
-                loss = nll + l2
+                exp_eta = torch.exp(eta)
+                loss = torch.sum(exp_eta - Y_batch * eta) + alpha * torch.sum(W**2)
+
                 loss.backward()
                 optimizer.step()
 
-            # Full train loss after epoch for logging
-            with torch.no_grad():
-                eta_train = torch.clamp(X_train @ W + b, max=20)
-                rate_train = torch.exp(eta_train)
-                nll_train = torch.sum(rate_train - Y_train * eta_train)
-                train_loss = nll_train + alpha * torch.sum(W**2)
+                del X_batch, Y_batch, eta, exp_eta, loss
 
-        elif optimizer_type.lower() == "adam":
-            # Full-batch Adam
-            optimizer.zero_grad()
-            eta_train = torch.clamp(X_train @ W + b, max=20)
-            rate_train = torch.exp(eta_train)
-            nll_train = torch.sum(rate_train - Y_train * eta_train)
-            l2 = alpha * torch.sum(W**2)
-            train_loss = nll_train + l2
+            # Evaluate on full training set
+            with torch.no_grad():
+                train_loss, train_bps = (
+                    evaluate_streamed(X_train_cpu, Y_train_cpu)
+                    if use_minibatch
+                    else evaluate_full_gpu(X_train, Y_train)
+                )
+
+        # ------------------------------
+        # Full-batch Adam
+        # ------------------------------
+        elif optimizer_type == "adam":
+
+            optimizer.zero_grad(set_to_none=True)
+
+            eta = torch.clamp(X_train @ W + b, max=20)
+            exp_eta = torch.exp(eta)
+            train_loss = torch.sum(exp_eta - Y_train * eta) + alpha * torch.sum(W**2)
+
             train_loss.backward()
             optimizer.step()
 
-        elif optimizer_type.lower() == "lbfgs":
-            # LBFGS closure
+            # Evaluate on full training set
+            with torch.no_grad():
+                train_loss, train_bps = (
+                    evaluate_streamed(X_train_cpu, Y_train_cpu)
+                    if use_minibatch
+                    else evaluate_full_gpu(X_train, Y_train)
+                )
+
+        # ------------------------------
+        # LBFGS
+        # ------------------------------
+        else:
+
             def closure():
-                optimizer.zero_grad()
-                eta_train_local = torch.clamp(X_train @ W + b, max=20)
-                rate_train_local = torch.exp(eta_train_local)
-                nll_local = torch.sum(rate_train_local - Y_train * eta_train_local)
-                l2_local = alpha * torch.sum(W**2)
-                loss_local = nll_local + l2_local
-                loss_local.backward()
-                return loss_local
+                optimizer.zero_grad(set_to_none=True)
+                eta = torch.clamp(X_train @ W + b, max=20)
+                exp_eta = torch.exp(eta)
+                loss = torch.sum(exp_eta - Y_train * eta) + alpha * torch.sum(W**2)
+                loss.backward()
+                return loss
 
             optimizer.step(closure)
-            # Evaluate train loss once per epoch
+
+            # Evaluate on full training set
             with torch.no_grad():
-                eta_train = torch.clamp(X_train @ W + b, max=20)
-                rate_train = torch.exp(eta_train)
-                nll_train = torch.sum(rate_train - Y_train * eta_train)
-                train_loss = nll_train + alpha * torch.sum(W**2)
+                train_loss, train_bps = (
+                    evaluate_streamed(X_train_cpu, Y_train_cpu)
+                    if use_minibatch
+                    else evaluate_full_gpu(X_train, Y_train)
+                )
 
+        # ------------------------------
+        # Record history
+        # ------------------------------
         train_loss_hist.append(train_loss.item())
+        train_bps_hist.append(train_bps.item())
 
-        # ---- Bits/Spike ----
-        with torch.no_grad():
-            mean_rate_train = torch.mean(Y_train, dim=0, keepdim=True)
-            logL_model_train = torch.sum(Y_train * torch.log(rate_train + eps) - rate_train)
-            logL_null_train = torch.sum(Y_train * torch.log(mean_rate_train + eps) - mean_rate_train)
-            train_bps = (logL_model_train - logL_null_train) / (torch.sum(Y_train) * log2)
-            train_bps_hist.append(train_bps.item())
+        # ------------------------------
+        # Validation
+        # ------------------------------
+        if has_val:
+            with torch.no_grad():
+                if use_minibatch:
+                    val_loss, val_bps = evaluate_streamed(X_val_cpu, Y_val_cpu)
+                else:
+                    val_loss, val_bps = evaluate_full_gpu(X_val, Y_val)
 
-            if has_val:
-                eta_val = torch.clamp(X_val @ W + b, max=20)
-                rate_val = torch.exp(eta_val)
-                nll_val = torch.sum(rate_val - Y_val * eta_val)
-                val_loss = nll_val + alpha * torch.sum(W**2)
-                val_loss_hist.append(val_loss.item())
+            val_loss_hist.append(val_loss.item())
+            val_bps_hist.append(val_bps.item())
 
-                mean_rate_val = torch.mean(Y_val, dim=0, keepdim=True)
-                logL_model_val = torch.sum(Y_val * torch.log(rate_val + eps) - rate_val)
-                logL_null_val = torch.sum(Y_val * torch.log(mean_rate_val + eps) - mean_rate_val)
-                val_bps = (logL_model_val - logL_null_val) / (torch.sum(Y_val) * log2)
-                val_bps_hist.append(val_bps.item())
-
-        # ---- Print ----
+        # ------------------------------
+        # Print
+        # ------------------------------
         if epoch % print_every == 0:
             msg = f"Epoch {epoch:3d} | Train Loss: {train_loss.item():.2e} | Train BPS: {train_bps.item():.5f}"
             if has_val:
                 msg += f" | Val Loss: {val_loss.item():.2e} | Val BPS: {val_bps.item():.5f}"
             print(msg)
 
-        # ---- Early stopping ----
-        if early_stopping and has_val:
-            if best_val_loss - val_loss.item() > tol:
-                best_val_loss = val_loss.item()
+        # ------------------------------
+        # Early stopping
+        # ------------------------------
+        if early_stopping:
+            monitor = val_loss.item() if has_val else train_loss.item()
+            if best_val_loss - monitor > tol:
+                best_val_loss = monitor
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
                 if epochs_no_improve >= patience:
-                    print("Early stopping triggered (val).")
-                    break
-        elif early_stopping:
-            if epoch > 0 and abs(train_loss_hist[-2] - train_loss_hist[-1]) < tol:
-                print("Early stopping triggered (train).")
-                break
+                    print("Early stopping triggered.")
+                    break 
 
     return (
         W.detach().cpu().numpy(),
@@ -235,237 +290,8 @@ def fit_poisson_glm_torch(
         val_bps_hist,
     )
 
-def fit_poisson_glm_hybrid_optimizer(
-    X,
-    Y,
-    alpha=None,
-    lr_adam=1e-4,
-    max_epochs_adam=200,
-    batch_size=2048,
-    max_epochs_lbfgs=100,
-    device=None,
-    print_every=5,
-    val_fraction=0.0,
-    seed=None,
-    early_stopping=True,
-    patience=10,
-    tol=1e-4
-):
-    """
-    Fit a multi-neuron Poisson GLM using a hybrid optimizer: Adam pretraining followed by LBFGS
-    fine-tuning.
 
-    This approach is memory-efficient and often faster for large datasets or GPUs with limited VRAM.
-
-    Args:
-        X (np.ndarray or torch.Tensor): Design matrix, shape (T, p)
-        Y (np.ndarray or torch.Tensor): Response matrix, shape (T, N)
-        alpha (float, optional): L2 regularization weight. Defaults to 0.
-        lr_adam (float): Learning rate for Adam pretraining. Defaults to 1e-4.
-        max_epochs_adam (int): Maximum epochs for Adam pretraining. Defaults to 200.
-        batch_size (int): Minibatch size for Adam. Defaults to 2048.
-        max_epochs_lbfgs (int): Maximum epochs for LBFGS fine-tuning. Defaults to 100.
-        device (str or torch.device, optional): "cpu" or "cuda". Defaults to auto-detect.
-        print_every (int): Print progress every N epochs. Defaults to 5.
-        val_fraction (float): Fraction of data to hold out for validation. Defaults to 0.0.
-        seed (int, optional): Random seed for reproducibility.
-        early_stopping (bool): Enable early stopping. Defaults to True.
-        patience (int): Number of epochs to wait for improvement before stopping. Defaults to 10.
-        tol (float): Minimum loss improvement to reset patience. Defaults to 1e-4.
-
-    Returns:
-        W (np.ndarray): Learned weights, shape (p, N)
-        b (np.ndarray): Learned biases, shape (N,)
-        train_loss_hist (list[float]): Training loss history per epoch (Adam + LBFGS)
-        val_loss_hist (list[float]): Validation loss history per epoch (Adam + LBFGS)
-        train_bps_hist (list[float]): Training bits/spike history per epoch
-        val_bps_hist (list[float]): Validation bits/spike history per epoch
-    """
-
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if alpha is None:
-        alpha = 0
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
-    # ---- Optional validation split ----
-    if val_fraction > 0:
-        rng = np.random.default_rng(seed)
-        T = X.shape[0]
-        idx = np.arange(T)
-        rng.shuffle(idx)
-        split = int(T * (1 - val_fraction))
-        train_idx, val_idx = idx[:split], idx[split:]
-        X_train, Y_train = X[train_idx], Y[train_idx]
-        X_val, Y_val = X[val_idx], Y[val_idx]
-    else:
-        X_train, Y_train = X, Y
-        X_val, Y_val = None, None
-
-    # ---- Move to torch ----
-    X_train = torch.tensor(X_train, dtype=torch.float32, device=device)
-    Y_train = torch.tensor(Y_train, dtype=torch.float32, device=device)
-    if X_val is not None:
-        X_val = torch.tensor(X_val, dtype=torch.float32, device=device)
-        Y_val = torch.tensor(Y_val, dtype=torch.float32, device=device)
-
-    T, p = X_train.shape
-    N = Y_train.shape[1]
-
-    # ---- Initialize parameters ----
-    W = torch.zeros(p, N, device=device, requires_grad=True)
-    b = torch.zeros(N, device=device, requires_grad=True)
-
-    log2 = torch.log(torch.tensor(2.0, device=device))
-    eps = 1e-12
-
-    # ---- History ----
-    train_loss_hist, val_loss_hist = [], []
-    train_bps_hist, val_bps_hist = [], []
-
-    has_val = X_val is not None
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
-
-    #### ---------------- Adam Pretraining ---------------- ####
-    optimizer_adam = torch.optim.Adam([W, b], lr=lr_adam)
-
-    for epoch in range(max_epochs_adam):
-        # Shuffle minibatches
-        idx = torch.randperm(T, device=device)
-        for start in range(0, T, batch_size):
-            end = min(start + batch_size, T)
-            batch_idx = idx[start:end]
-            X_batch, Y_batch = X_train[batch_idx], Y_train[batch_idx]
-
-            optimizer_adam.zero_grad()
-            eta = torch.clamp(X_batch @ W + b, max=20)
-            rate = torch.exp(eta)
-            nll = torch.sum(rate - Y_batch * eta)
-            l2 = alpha * torch.sum(W**2)
-            (nll + l2).backward()
-            optimizer_adam.step()
-
-        # ---- Evaluate full train loss after epoch ----
-        with torch.no_grad():
-            eta_train = torch.clamp(X_train @ W + b, max=20)
-            rate_train = torch.exp(eta_train)
-            nll_train = torch.sum(rate_train - Y_train * eta_train)
-            train_loss = nll_train + alpha * torch.sum(W**2)
-            train_loss_hist.append(train_loss.item())
-
-            mean_rate_train = torch.mean(Y_train, dim=0, keepdim=True)
-            logL_model_train = torch.sum(Y_train * torch.log(rate_train + eps) - rate_train)
-            logL_null_train = torch.sum(Y_train * torch.log(mean_rate_train + eps) - mean_rate_train)
-            train_bps = (logL_model_train - logL_null_train) / (torch.sum(Y_train) * log2)
-            train_bps_hist.append(train_bps.item())
-
-            if has_val:
-                eta_val = torch.clamp(X_val @ W + b, max=20)
-                rate_val = torch.exp(eta_val)
-                nll_val = torch.sum(rate_val - Y_val * eta_val)
-                val_loss = nll_val + alpha * torch.sum(W**2)
-                val_loss_hist.append(val_loss.item())
-
-                mean_rate_val = torch.mean(Y_val, dim=0, keepdim=True)
-                logL_model_val = torch.sum(Y_val * torch.log(rate_val + eps) - rate_val)
-                logL_null_val = torch.sum(Y_val * torch.log(mean_rate_val + eps) - mean_rate_val)
-                val_bps = (logL_model_val - logL_null_val) / (torch.sum(Y_val) * log2)
-                val_bps_hist.append(val_bps.item())
-
-        # ---- Print ----
-        if epoch % print_every == 0:
-            msg = f"[Adam] Epoch {epoch:3d} | Train Loss: {train_loss.item():.2e} | Train BPS: {train_bps.item():.5f}"
-            if has_val:
-                msg += f" | Val Loss: {val_loss.item():.2e} | Val BPS: {val_bps.item():.5f}"
-            print(msg)
-
-        # ---- Early stopping ----
-        if early_stopping:
-            monitor_loss = val_loss.item() if has_val else train_loss.item()
-            if best_val_loss - monitor_loss > tol:
-                best_val_loss = monitor_loss
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print("Early stopping triggered during Adam pretraining.")
-                    break
-
-    #### ---------------- LBFGS Fine-tuning ---------------- ####
-    optimizer_lbfgs = torch.optim.LBFGS([W, b], max_iter=20, line_search_fn="strong_wolfe")
-
-    def closure():
-        optimizer_lbfgs.zero_grad()
-        eta_train_local = torch.clamp(X_train @ W + b, max=20)
-        rate_train_local = torch.exp(eta_train_local)
-        nll_local = torch.sum(rate_train_local - Y_train * eta_train_local)
-        l2_local = alpha * torch.sum(W**2)
-        loss_local = nll_local + l2_local
-        loss_local.backward()
-        return loss_local
-
-    epochs_no_improve = 0  # reset for LBFGS
-    best_val_loss = float("inf")
-
-    for epoch in range(max_epochs_lbfgs):
-        optimizer_lbfgs.step(closure)
-
-        with torch.no_grad():
-            eta_train = torch.clamp(X_train @ W + b, max=20)
-            rate_train = torch.exp(eta_train)
-            nll_train = torch.sum(rate_train - Y_train * eta_train)
-            train_loss = nll_train + alpha * torch.sum(W**2)
-            train_loss_hist.append(train_loss.item())
-
-            mean_rate_train = torch.mean(Y_train, dim=0, keepdim=True)
-            logL_model_train = torch.sum(Y_train * torch.log(rate_train + eps) - rate_train)
-            logL_null_train = torch.sum(Y_train * torch.log(mean_rate_train + eps) - mean_rate_train)
-            train_bps = (logL_model_train - logL_null_train) / (torch.sum(Y_train) * log2)
-            train_bps_hist.append(train_bps.item())
-
-            if has_val:
-                eta_val = torch.clamp(X_val @ W + b, max=20)
-                rate_val = torch.exp(eta_val)
-                nll_val = torch.sum(rate_val - Y_val * eta_val)
-                val_loss = nll_val + alpha * torch.sum(W**2)
-                val_loss_hist.append(val_loss.item())
-
-                mean_rate_val = torch.mean(Y_val, dim=0, keepdim=True)
-                logL_model_val = torch.sum(Y_val * torch.log(rate_val + eps) - rate_val)
-                logL_null_val = torch.sum(Y_val * torch.log(mean_rate_val + eps) - mean_rate_val)
-                val_bps = (logL_model_val - logL_null_val) / (torch.sum(Y_val) * log2)
-                val_bps_hist.append(val_bps.item())
-
-        # ---- Print ----
-        if epoch % print_every == 0:
-            msg = f"[LBFGS] Epoch {epoch:3d} | Train Loss: {train_loss.item():.2e} | Train BPS: {train_bps.item():.5f}"
-            if has_val:
-                msg += f" | Val Loss: {val_loss.item():.2e} | Val BPS: {val_bps.item():.5f}"
-            print(msg)
-
-        # ---- Early stopping ----
-        if early_stopping:
-            monitor_loss = val_loss.item() if has_val else train_loss.item()
-            if best_val_loss - monitor_loss > tol:
-                best_val_loss = monitor_loss
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print("Early stopping triggered during LBFGS fine-tuning.")
-                    break
-
-    # ---- Final summary ----
-    msg = f"[Final] Train Loss: {train_loss_hist[-1]:.2e} | Train BPS: {train_bps_hist[-1]:.5f}"
-    if has_val:
-        msg += f" | Val Loss: {val_loss_hist[-1]:.2e} | Val BPS: {val_bps_hist[-1]:.5f}"
-    print(msg)
-
-    return W.detach().cpu().numpy(), b.detach().cpu().numpy(), train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist
-
-def choose_optimizer(X, Y, p=500, N=None, buffer_factor=1.2, float_precision=32):
+def choose_optimizer(X, Y, buffer_factor=1.2,):
     """
     Decide whether to use LBFGS (full-batch) or Adam (minibatch) based on dataset size 
     and estimated memory requirements.
@@ -483,20 +309,20 @@ def choose_optimizer(X, Y, p=500, N=None, buffer_factor=1.2, float_precision=32)
         batch_size (int or None): None for LBFGS, recommended minibatch size for Adam
     """
 
-    if N is None:
-        N = Y.shape[1]
+    N = Y.shape[1]
 
-    T = X.shape[0]
+    T,p = X.shape
 
     # convert float precision to bytes
-    precision_to_bytes = {16: 2, 32: 4, 64: 8}
-    bytes_per_element = precision_to_bytes[float_precision]
+    xbytes = X[0,0].nbytes
+    ybytes = Y[0,0].nbytes
     # get datatype of X and Y to determine bytes per element
-    X_mem = T * p * bytes_per_element
-    Y_mem = T * N * bytes_per_element
-    W_mem = p * N * bytes_per_element
-    b_mem = N * bytes_per_element
+    X_mem = T * p * xbytes
+    Y_mem = T * N * ybytes
+    W_mem = p * N * xbytes
+    b_mem = N * xbytes
     total_mem_needed = (X_mem + Y_mem + W_mem + b_mem) * buffer_factor
+    print(f'Total memory needed for LBFGS: {total_mem_needed / 1e9:.2e} GB (X: {X_mem / 1e9:.2e} GB, Y: {Y_mem / 1e9:.2e} GB, W: {W_mem / 1e9:.2e} GB, b: {b_mem / 1e9:.2e} GB)')
 
     # Check GPU memory
     if torch.cuda.is_available():
@@ -504,10 +330,14 @@ def choose_optimizer(X, Y, p=500, N=None, buffer_factor=1.2, float_precision=32)
         if total_mem_needed < gpu_mem:
             return "lbfgs", None
         else:
-            # pick minibatch size ~1% of dataset or 4096, whichever smaller
-            batch_size = min(max(1, int(T * 0.01)), 4096)
+            # pick minibatch size so that it would fit in GPU memory
+            # We can estimate the memory for a single batch as:
+            batch_W_mem = p * N * xbytes
+            batch_b_mem = N * xbytes
+            batch_size = int((gpu_mem / buffer_factor - batch_W_mem - batch_b_mem) / (p * xbytes + N * ybytes))
             return "adam", batch_size
     else:
+        raise RuntimeError("No GPU available.")
         # CPU fallback: assume ~16GB available, same logic
         cpu_mem_limit = 16 * 1024**3
         if total_mem_needed < cpu_mem_limit:
