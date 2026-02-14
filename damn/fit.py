@@ -1,3 +1,17 @@
+"""
+Poisson GLM fitting with PyTorch
+
+This module provides functions to fit multi-neuron Poisson Generalized Linear Models (GLMs)
+using PyTorch. It supports both full-batch (LBFGS) and minibatch (Adam) optimization, optional
+internal validation splits, early stopping, and hybrid optimization (Adam pretraining + LBFGS
+fine-tuning). In general, LBFGS is always recommended if the data will fit in VRAM. Adam optimization
+is preferred for very large datasets or when GPU memory is limited, but it will often converge more slowly.
+We also provide a hybrid optimizer that uses Adam for initial training and then LBFGS for final fine-tuning.
+This minimized the number of LBFGS iterations, which can be very slow when memory is tight.
+
+Author: Max Melin, 2025
+"""
+
 import torch
 import numpy as np
 
@@ -18,14 +32,34 @@ def fit_poisson_glm_torch(
     batch_size=None             # minibatch size for Adam
 ):
     """
-    Fit multi-neuron Poisson GLM using PyTorch.
+    Fit a multi-neuron Poisson GLM using PyTorch.
 
-    Features:
-    - Optional internal validation split
-    - Adam (supports minibatch) or LBFGS optimizer
-    - Tracks training/validation loss and bits/spike
-    - Early stopping on validation loss
-    - Fully optimized for LBFGS (no duplicate forward passes)
+    Supports both Adam (minibatch) and LBFGS (full-batch) optimizers, optional internal 
+    validation, early stopping, and returns training history.
+
+    Args:
+        X (np.ndarray or torch.Tensor): Design matrix, shape (T, p)
+        Y (np.ndarray or torch.Tensor): Response matrix, shape (T, N)
+        alpha (float, optional): L2 regularization weight. Defaults to 0.
+        optimizer_type (str): "adam" or "lbfgs". Defaults to "lbfgs".
+        lr (float): Learning rate for Adam optimizer. Ignored for LBFGS. Defaults to 1e-3.
+        max_epochs (int): Maximum number of training epochs. Defaults to 100.
+        device (str or torch.device): "cpu" or "cuda". Defaults to auto-detect.
+        print_every (int): Print training progress every N epochs. Defaults to 5.
+        early_stopping (bool): Enable early stopping. Defaults to False.
+        patience (int): Number of epochs to wait for improvement before stopping. Defaults to 10.
+        tol (float): Minimum loss improvement to reset patience. Defaults to 1e-4.
+        val_fraction (float): Fraction of data to hold out for validation. Defaults to 0.0.
+        seed (int, optional): Random seed for reproducibility.
+        batch_size (int, optional): Mini-batch size for Adam. Ignored for LBFGS.
+
+    Returns:
+        W (np.ndarray): Learned weights, shape (p, N)
+        b (np.ndarray): Learned biases, shape (N,)
+        train_loss_hist (list[float]): Training loss history per epoch
+        val_loss_hist (list[float]): Validation loss history per epoch
+        train_bps_hist (list[float]): Training bits/spike history per epoch
+        val_bps_hist (list[float]): Validation bits/spike history per epoch
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -218,15 +252,36 @@ def fit_poisson_glm_hybrid_optimizer(
     tol=1e-4
 ):
     """
-    Hybrid Poisson GLM fit:
-    This algorithm is especially useful for low VRAM scenarios where a typical LBFGS-only fit would be slow.
-    1. Pretrain with Adam (minibatch)
-    2. Fine-tune with LBFGS (full-batch)
-    Supports optional early stopping.
+    Fit a multi-neuron Poisson GLM using a hybrid optimizer: Adam pretraining followed by LBFGS
+    fine-tuning.
+
+    This approach is memory-efficient and often faster for large datasets or GPUs with limited VRAM.
+
+    Args:
+        X (np.ndarray or torch.Tensor): Design matrix, shape (T, p)
+        Y (np.ndarray or torch.Tensor): Response matrix, shape (T, N)
+        alpha (float, optional): L2 regularization weight. Defaults to 0.
+        lr_adam (float): Learning rate for Adam pretraining. Defaults to 1e-4.
+        max_epochs_adam (int): Maximum epochs for Adam pretraining. Defaults to 200.
+        batch_size (int): Minibatch size for Adam. Defaults to 2048.
+        max_epochs_lbfgs (int): Maximum epochs for LBFGS fine-tuning. Defaults to 100.
+        device (str or torch.device, optional): "cpu" or "cuda". Defaults to auto-detect.
+        print_every (int): Print progress every N epochs. Defaults to 5.
+        val_fraction (float): Fraction of data to hold out for validation. Defaults to 0.0.
+        seed (int, optional): Random seed for reproducibility.
+        early_stopping (bool): Enable early stopping. Defaults to True.
+        patience (int): Number of epochs to wait for improvement before stopping. Defaults to 10.
+        tol (float): Minimum loss improvement to reset patience. Defaults to 1e-4.
 
     Returns:
-        W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist
+        W (np.ndarray): Learned weights, shape (p, N)
+        b (np.ndarray): Learned biases, shape (N,)
+        train_loss_hist (list[float]): Training loss history per epoch (Adam + LBFGS)
+        val_loss_hist (list[float]): Validation loss history per epoch (Adam + LBFGS)
+        train_bps_hist (list[float]): Training bits/spike history per epoch
+        val_bps_hist (list[float]): Validation bits/spike history per epoch
     """
+
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if alpha is None:
@@ -412,19 +467,22 @@ def fit_poisson_glm_hybrid_optimizer(
 
 def choose_optimizer(X, Y, p=500, N=None, buffer_factor=1.2, float_precision=32):
     """
-    Decide between LBFGS (full-batch) or Adam (minibatch) based on dataset size and GPU memory.
+    Decide whether to use LBFGS (full-batch) or Adam (minibatch) based on dataset size 
+    and estimated memory requirements.
 
     Args:
-        X: numpy array or torch tensor of shape (T, p) -- design matrix
-        Y: numpy array or torch tensor of shape (T, N) -- responses
-        p: number of regressors (can infer from X)
-        N: number of neurons (columns of Y)
-        buffer_factor: safety factor to avoid using full GPU memory
+        X (np.ndarray or torch.Tensor): Design matrix, shape (T, p)
+        Y (np.ndarray or torch.Tensor): Response matrix, shape (T, N)
+        p (int): Number of regressors (columns of X). Defaults to 500.
+        N (int, optional): Number of neurons (columns of Y). If None, inferred from Y.
+        buffer_factor (float): Safety factor for memory estimation. Defaults to 1.2.
+        float_precision (int): Precision of floats (16, 32, 64). Defaults to 32.
 
     Returns:
-        optimizer_choice: "lbfgs" or "adam"
-        batch_size: None for LBFGS, recommended batch size for Adam
+        optimizer_choice (str): "lbfgs" for full-batch or "adam" for minibatch
+        batch_size (int or None): None for LBFGS, recommended minibatch size for Adam
     """
+
     if N is None:
         N = Y.shape[1]
 
