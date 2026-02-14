@@ -6,7 +6,7 @@ def fit_poisson_glm_torch(
     Y,
     alpha=None,
     optimizer_type="lbfgs",      # "adam" or "lbfgs"
-    lr=1e-2,
+    lr=1e-3,
     max_epochs=100,
     device=None,
     print_every=5,
@@ -73,6 +73,7 @@ def fit_poisson_glm_torch(
     elif optimizer_type.lower() == "lbfgs":
         if batch_size is not None:
             print("Warning: LBFGS ignores batch_size and is always full-batch")
+        print("Using LBFGS optimizer (full-batch). Will ignore learning rate and batch size.")
         optimizer = torch.optim.LBFGS([W, b], max_iter=20, line_search_fn="strong_wolfe")
         use_minibatch = False
     else:
@@ -204,7 +205,7 @@ def fit_poisson_glm_hybrid_optimizer(
     X,
     Y,
     alpha=None,
-    lr_adam=1e-2,
+    lr_adam=1e-4,
     max_epochs_adam=200,
     batch_size=2048,
     max_epochs_lbfgs=100,
