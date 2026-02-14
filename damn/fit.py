@@ -25,7 +25,7 @@ def fit_poisson_glm_torch(
     val_fraction=0.0, # create a validation split if >0
     early_stopping=False,
     print_every=1,
-    patience=10,
+    patience=5,
     tol=1e-4,
     seed=None,
     device=None,
@@ -262,9 +262,9 @@ def fit_poisson_glm_torch(
         # Print
         # ------------------------------
         if epoch % print_every == 0:
-            msg = f"Epoch {epoch:3d} | Train Loss: {train_loss.item():.2e} | Train BPS: {train_bps.item():.5f}"
+            msg = f"Epoch {epoch:3d} | Train Loss: {train_loss.item():.5e} | Train BPS: {train_bps.item():.5f}"
             if has_val:
-                msg += f" | Val Loss: {val_loss.item():.2e} | Val BPS: {val_bps.item():.5f}"
+                msg += f" | Val Loss: {val_loss.item():.5e} | Val BPS: {val_bps.item():.5f}"
             print(msg)
 
         # ------------------------------
