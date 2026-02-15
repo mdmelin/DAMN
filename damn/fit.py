@@ -3,11 +3,8 @@ Poisson GLM fitting with PyTorch
 
 This module provides functions to fit multi-neuron Poisson Generalized Linear Models (GLMs)
 using PyTorch. It supports both full-batch (LBFGS) and minibatch (Adam) optimization, optional
-internal validation splits, early stopping, and hybrid optimization (Adam pretraining + LBFGS
-fine-tuning). In general, LBFGS is always recommended if the data will fit in VRAM. Adam optimization
-is preferred for very large datasets or when GPU memory is limited, but it will often converge more slowly.
-We also provide a hybrid optimizer that uses Adam for initial training and then LBFGS for final fine-tuning.
-This minimized the number of LBFGS iterations, which can be very slow when memory is tight.
+internal validation splits, early stopping. In general, LBFGS is always recommended if the data will fit in VRAM. 
+Adam optimization is preferred for very large datasets or when GPU memory is limited, but it will often converge much more slowly than LBFGS would.
 
 Author: Max Melin, 2025
 """
@@ -280,10 +277,15 @@ def fit_poisson_glm_torch(
                 if epochs_no_improve >= patience:
                     print("Early stopping triggered.")
                     break 
-
+    Wcpu = W.detach().cpu().numpy()
+    bcpu = b.detach().cpu().numpy()
+    del W, b, X_train, Y_train, optimizer
+    if has_val:
+        del X_val, Y_val
+    torch.cuda.empty_cache()
     return (
-        W.detach().cpu().numpy(),
-        b.detach().cpu().numpy(),
+        Wcpu,
+        bcpu,
         train_loss_hist,
         val_loss_hist,
         train_bps_hist,
