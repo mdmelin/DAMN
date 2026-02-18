@@ -232,7 +232,7 @@ class DesignMatrix:
                 else:
                     reg.disable_shuffle()
     
-    def hide_regressor_with_tag(self, tags):
+    def remove_regressor_with_tag(self, tags):
         if isinstance(tags, str):
             tags = [tags]
         tags = set(tags)
