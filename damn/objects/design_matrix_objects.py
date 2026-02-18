@@ -21,6 +21,11 @@ class DesignMatrix:
                     f"Regressor with name {regressor.name} already exists"
                 )
             self.regressors[regressor.name] = regressor
+    
+    def remove_regressor(self, name):
+        if name not in self.regressors:
+            raise ValueError(f"No regressor with name {name} found")
+        del self.regressors[name]
 
     def build_matrix(self, Y=None,):
         # TODO: add option to shuffle particular regressors
@@ -214,6 +219,34 @@ class DesignMatrix:
                     reg.enable_shuffle()
                 else:
                     reg.disable_shuffle()
+    
+    def remove_regressor_with_tag(self, tags):
+        if isinstance(tags, str):
+            tags = [tags]
+        tags = set(tags)
 
-                    
-                    
+        for reg in list(self.regressors.values()):
+            if reg.tags & tags:  # any overlap
+                print(f'Removing regressor "{reg.name}" with tags {reg.tags}')
+                self.remove_regressor(reg.name)
+    
+    def remove_all_except_tags(self, tags):
+        if isinstance(tags, str):
+            tags = [tags]
+        tags = set(tags)
+
+        for reg in list(self.regressors.values()):
+            if not (reg.tags & tags):  # no overlap
+                print(f'Removing regressor "{reg.name}" with tags {reg.tags}')
+                self.remove_regressor(reg.name)
+    
+    def remove_all_except_name(self, names):
+        if isinstance(names, str):
+            names = [names]
+        names = set(names)
+
+        for reg in list(self.regressors.values()):
+            if reg.name not in names:
+                print(f'Removing regressor "{reg.name}" with tags {reg.tags}')
+                self.remove_regressor(reg.name)
+
