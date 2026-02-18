@@ -12,6 +12,7 @@ class DesignMatrix:
         self.master_post_s = master_post_s
         self.binwidth_s = binwidth_s
         self.regressors = {}
+        self.hidden_regressors = {}
 
     def add_regressor(self, regressor):
             # TODO: add by name and specify the type (Event or Continuous) and parameters (including basis functions)
@@ -25,8 +26,19 @@ class DesignMatrix:
     def remove_regressor(self, name):
         if name not in self.regressors:
             raise ValueError(f"No regressor with name {name} found")
-        del self.regressors[name]
-
+        # move to hidden regressors in case we want to add it back later
+        self.hidden_regressors[name] = self.regressors.pop(name)
+    
+    def unhide_regressor(self, name):
+        if name not in self.hidden_regressors:
+            raise ValueError(f"No hidden regressor with name {name} found")
+        self.regressors[name] = self.hidden_regressors.pop(name)
+    
+    def unhide_all_regressors(self):
+        print('Unhiding all regressors')
+        for name in list(self.hidden_regressors.keys()):
+            self.unhide_regressor(name)
+        
     def build_matrix(self, Y=None,):
         # TODO: add option to shuffle particular regressors
         for reg in self.regressors.values():
@@ -220,14 +232,14 @@ class DesignMatrix:
                 else:
                     reg.disable_shuffle()
     
-    def remove_regressor_with_tag(self, tags):
+    def hide_regressor_with_tag(self, tags):
         if isinstance(tags, str):
             tags = [tags]
         tags = set(tags)
-
         for reg in list(self.regressors.values()):
             if reg.tags & tags:  # any overlap
                 print(f'Removing regressor "{reg.name}" with tags {reg.tags}')
+                # hide the regressor instead of deleting it, so we can easily add it back later if needed
                 self.remove_regressor(reg.name)
     
     def remove_all_except_tags(self, tags):
