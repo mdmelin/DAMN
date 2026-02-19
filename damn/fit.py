@@ -52,7 +52,7 @@ def fit_poisson_glm_best_alpha(
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if alpha_grid is None:
-        alpha_grid = np.logspace(-1, 3, 5)
+        alpha_grid = np.logspace(-3, 3, 7)
 
     best_alpha = None
     best_val_loss = float("inf")
@@ -456,40 +456,41 @@ def _poisson_deviance_loss(W, b, X, Y, alpha):
 
 
 def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
-    log2 = torch.log(torch.tensor(2.0, device=device))
-    eps = 1e-12
-
-    total_loss = 0.0
-    logL_model = 0.0
-    logL_null = 0.0
-    total_spikes = 0.0
-
-    # Compute mean rate of each neuron for null model
-    mean_rate = torch.mean(Y_cpu, dim=0, keepdim=True).to(device)
-
-    for start in range(0, X_cpu.shape[0], eval_batch_size):
-        end = min(start + eval_batch_size, X_cpu.shape[0])
-        Xb = X_cpu[start:end].to(device, non_blocking=True)
-        Yb = Y_cpu[start:end].to(device, non_blocking=True)
-
-        # Predicted log-rate and rate
-        eta = torch.clamp(Xb @ W + b, max=12)
-        mu = torch.exp(eta)
-
-        # Poisson deviance / log-likelihood terms
-        total_loss += torch.sum(mu - Yb * eta)
-        logL_model += torch.sum(Yb * eta - mu)
-        logL_null += torch.sum(Yb * torch.log(mean_rate + eps) - mean_rate)
-        total_spikes += torch.sum(Yb)
-
-        del Xb, Yb, eta, mu
-
-    # Add L2 penalty
-    total_loss += alpha * torch.sum(W**2)
-
-    # Bits per spike, averaged over all spikes, independent of batch size
-    bps = (logL_model - logL_null) / (total_spikes * log2)
-
+    with torch.no_grad():
+        log2 = torch.log(torch.tensor(2.0, device=device))
+        eps = 1e-12
+    
+        total_loss = 0.0
+        logL_model = 0.0
+        logL_null = 0.0
+        total_spikes = 0.0
+    
+        # Compute mean rate of each neuron for null model
+        mean_rate = torch.mean(Y_cpu, dim=0, keepdim=True).to(device)
+    
+        for start in range(0, X_cpu.shape[0], eval_batch_size):
+            end = min(start + eval_batch_size, X_cpu.shape[0])
+            Xb = X_cpu[start:end].to(device, non_blocking=True)
+            Yb = Y_cpu[start:end].to(device, non_blocking=True)
+    
+            # Predicted log-rate and rate
+            eta = torch.clamp(Xb @ W + b, max=12)
+            mu = torch.exp(eta)
+    
+            # Poisson deviance / log-likelihood terms
+            total_loss += torch.sum(mu - Yb * eta)
+            logL_model += torch.sum(Yb * eta - mu)
+            logL_null += torch.sum(Yb * torch.log(mean_rate + eps) - mean_rate)
+            total_spikes += torch.sum(Yb)
+    
+            del Xb, Yb, eta, mu
+    
+        # Add L2 penalty
+        total_loss += alpha * torch.sum(W**2)
+    
+        # Bits per spike, averaged over all spikes, independent of batch size
+        bps = (logL_model - logL_null) / (total_spikes * log2)
+    
     return total_loss, bps
 
 
