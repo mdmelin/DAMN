@@ -39,7 +39,7 @@ class DesignMatrix:
         for name in list(self.hidden_regressors.keys()):
             self.unhide_regressor(name)
         
-    def build_matrix(self, Y=None,):
+    def build_matrix(self, Y=None):
         # TODO: add option to shuffle particular regressors
         for reg in self.regressors.values():
             print(f'Building regressor: "{reg.name}"')

@@ -50,6 +50,8 @@ def fit_poisson_glm_best_alpha(
 
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    assert val_fraction > 0, "val_fraction must be > 0 to select best alpha based on validation loss"
 
     if alpha_grid is None:
         alpha_grid = np.logspace(-3, 3, 7)
@@ -101,6 +103,13 @@ def fit_poisson_glm_best_alpha(
             best_val_loss = val_loss_hist[-1]
             best_alpha = alpha
             best_W, best_b = W, b
+
+    val_losses = [history[a]["val_loss_hist"][-1] for a in alpha_grid if history[a]["val_loss_hist"]]
+    if len(val_losses) >= 2:
+        if np.all(np.diff(val_losses) < 0):
+            print("Warning: Validation loss decreases monotonically across the alpha grid. Consider adding smaller alpha values to the grid.")
+        elif np.all(np.diff(val_losses) > 0):
+            print("Warning: Validation loss increases monotonically across the alpha grid. Consider adding larger alpha values to the grid.")
 
     print(f"\nBest alpha selected: {best_alpha} with val loss {best_val_loss:.5e}")
 
@@ -302,15 +311,14 @@ def fit_poisson_glm_adam(
     epochs_no_improve = 0
 
     for epoch in range(max_epochs):
-
         perm = torch.randperm(T_train)
-
         for start in range(0, T_train, batch_size):
             end = min(start + batch_size, T_train)
-            batch_idx = perm[start:end]
+            idx = perm[start:end] # randomly permute to break temporal correlations
 
-            Xb = X_train_cpu[batch_idx].to(device, non_blocking=True)
-            Yb = Y_train_cpu[batch_idx].to(device, non_blocking=True)
+            # Stream batch to GPU
+            Xb = X_train_cpu[idx].to(device, non_blocking=True)
+            Yb = Y_train_cpu[idx].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             loss = _poisson_loss(W, b, Xb, Yb, alpha)
@@ -540,10 +548,7 @@ def choose_optimizer(X, Y, buffer_factor=1.2,):
     Args:
         X (np.ndarray or torch.Tensor): Design matrix, shape (T, p)
         Y (np.ndarray or torch.Tensor): Response matrix, shape (T, N)
-        p (int): Number of regressors (columns of X). Defaults to 500.
-        N (int, optional): Number of neurons (columns of Y). If None, inferred from Y.
         buffer_factor (float): Safety factor for memory estimation. Defaults to 1.2.
-        float_precision (int): Precision of floats (16, 32, 64). Defaults to 32.
 
     Returns:
         optimizer_choice (str): "lbfgs" for full-batch or "adam" for minibatch
