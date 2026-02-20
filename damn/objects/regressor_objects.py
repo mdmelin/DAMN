@@ -195,7 +195,14 @@ class EventRegressor:
         for kernel, t in zip(kernels, times):
             shift = np.searchsorted(full_time, t[0])
             end = min(shift + kernel.shape[0], full_kernel.shape[0]) # avoid off by 1 because of bin rounding
-            full_kernel[shift:end, :] += kernel[:end - shift, :]
+            if shift >= 0:
+                full_kernel[shift:end, :] += kernel[:end - shift, :]
+            else:
+                full_kernel[:end, :] += kernel[-shift:end - shift, :]
+                
+                
+            # add the kernel values to the full kernel, allowing for overlap if multiple basis functions cover the same time bins
+                    
 
         if link_function is not None:
             if bias is None:
