@@ -23,3 +23,14 @@ def bits_per_spike_multi_target(y_true, y_pred):
     for i in range(y_true.shape[1]):
         scores.append(bits_per_spike(y_true[:, i], y_pred[:, i]))
     return np.array(scores)
+
+def r_squared(y_true, y_pred):
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    return 1 - (ss_res / ss_tot)
+
+def r_squared_multi_target(y_true, y_pred):
+    scores = []
+    for i in range(y_true.shape[1]):
+        scores.append(r_squared(y_true[:, i], y_pred[:, i]))
+    return np.array(scores)
