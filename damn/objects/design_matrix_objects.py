@@ -1,4 +1,5 @@
 import numpy as np
+from sklearn.calibration import Hidden
 
 # =========================
 # Design matrix (houses Regressor objects)
@@ -164,10 +165,26 @@ class DesignMatrix:
     def shuffle_all(self):
         for reg in self.regressors.values():
             reg.enable_shuffle()
+        for reg in self.hidden_regressors.values():
+            reg.enable_shuffle()
     
     def unshuffle_all(self):
         for reg in self.regressors.values():
             reg.disable_shuffle()
+        for reg in self.hidden_regressors.values():
+            reg.disable_shuffle()
+             
+    def zero_all(self):
+        for reg in self.regressors.values():
+            reg._zeroed = True
+        for reg in self.hidden_regressors.values():
+            reg._zeroed = True
+    
+    def unzero_all(self):
+        for reg in self.regressors.values():
+            reg._zeroed = False
+        for reg in self.hidden_regressors.values():
+            reg._zeroed = False
     
 
     
@@ -231,6 +248,34 @@ class DesignMatrix:
                     reg.enable_shuffle()
                 else:
                     reg.disable_shuffle()
+        for reg in self.hidden_regressors.values():
+            if reg.tags & tags:  # any overlap
+                if shuffle:
+                    reg.enable_shuffle()
+                else:
+                    reg.disable_shuffle()
+    
+    def set_zeroed_tags(self, tags, zeroed):
+        """
+        Mark all regressors with the given tag(s) to be zeroed out.
+
+        Parameters
+        ----------
+        tags : str or list[str]
+            Tag(s) identifying which regressors to zero out.
+        zeroed : bool
+            Whether to turn zeroing on or off.
+        """
+        if isinstance(tags, str):
+            tags = [tags]
+        tags = set(tags)
+
+        for reg in self.regressors.values():
+            if reg.tags & tags:  # any overlap
+                reg._zeroed = zeroed
+        for reg in self.hidden_regressors.values():
+            if reg.tags & tags:
+                reg._zeroed = zeroed
     
     def remove_regressor_with_tag(self, tags):
         if isinstance(tags, str):

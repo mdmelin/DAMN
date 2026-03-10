@@ -32,6 +32,7 @@ class EventRegressor:
         self._basis_col_ranges = None   # cached after build
         self._coefficients = None  # internal storage
         self._shuffle = False
+        self._zeroed = False
 
         if event_values is None:
             self.event_values = np.ones_like(event_times)
@@ -107,6 +108,9 @@ class EventRegressor:
     def X(self):
         if self._X is None:
             return None
+        # zero out columns if enabled
+        if self._zeroed:
+            return np.zeros_like(self._X)
         # shuffle each column independently if enabled
         if self._shuffle:
             shuffled_X = self._X.copy()
@@ -213,6 +217,14 @@ class EventRegressor:
             full_kernel = link_function(full_kernel + bias)
 
         return full_kernel, full_time
+    
+    def enable_zero(self):
+        print(f'Enabling zeroing for regressor "{self.name}"')
+        self._zeroed = True
+    
+    def disable_zero(self):
+        print(f'Disabling zeroing for regressor "{self.name}"')
+        self._zeroed = False
             
     def enable_shuffle(self):
         print(f'Enabling shuffle for regressor "{self.name}"')
@@ -337,7 +349,6 @@ class ContinuousRegressor(EventRegressor):
 
     def build_regressor(self, master_alignment_times,
               master_pre_s, master_post_s):
-        # TODO: add option to shuffle, probably in EventRegressor
         master_bin_times = generate_master_alignment_bin_times(master_alignment_times,
                                                                master_pre_s,
                                                                master_post_s,
