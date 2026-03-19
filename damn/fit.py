@@ -60,6 +60,7 @@ def fit_poisson_glm_best_alpha_per_target(
 
     if alpha_grid is None:
         alpha_grid = np.logspace(-3, 3, 7)
+    alpha_grid = np.sort(alpha_grid)
 
     best_alpha = None
     Ws, bs, val_losses = [],[],[]
@@ -117,13 +118,13 @@ def fit_poisson_glm_best_alpha_per_target(
     increasing = np.all(lossdiff > 0, axis=0)
 
     if np.any(decreasing):
-        print(f'WARNING: Validation loss decreases monotonically across the alpha grid for targets {np.where(decreasing)[0]}. Consider adding smaller alpha values to the grid.')
+        print(f'WARNING: Validation loss decreases monotonically across the alpha grid for targets {np.where(decreasing)[0]}. Consider adding larger alpha values to the grid.')
     if np.any(increasing):
-        print(f'WARNING: Validation loss increases monotonically across the alpha grid for targets {np.where(increasing)[0]}. Consider adding larger alpha values to the grid.')
-        
+        print(f'WARNING: Validation loss increases monotonically across the alpha grid for targets {np.where(increasing)[0]}. Consider adding smaller alpha values to the grid.')
+
     # compute the best alpha per target
     best_alpha_idx = np.argmin(val_losses, axis=0)
-    best_alpha = np.array(alpha_grid)[best_alpha_idx]
+    best_alpha = alpha_grid[best_alpha_idx]
     best_W = np.stack([Ws[ind][:,i] for i,ind in enumerate(best_alpha_idx)])
     best_b = np.stack([bs[ind][i] for i,ind in enumerate(best_alpha_idx)])
 
@@ -161,17 +162,17 @@ def fit_poisson_glm_best_alpha(
 
     if alpha_grid is None:
         alpha_grid = np.logspace(-3, 3, 7)
+    alpha_grid = np.sort(alpha_grid)
 
     best_alpha = None
-    best_val_loss = float("inf")
-    best_W, best_b = None, None
+    Ws, bs, val_losses = [],[],[]
     history = {}
 
     for alpha in alpha_grid:
         print(f"\n--- Trying alpha = {alpha} ---")
 
         if optimizer_type.lower() == "lbfgs":
-            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist = fit_poisson_glm_lbfgs(
+            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_lbfgs(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
@@ -181,10 +182,11 @@ def fit_poisson_glm_best_alpha(
                 patience=patience,
                 tol=tol,
                 device=device,
+                per_target_loss=True,
                 **fit_kwargs
             )
         elif optimizer_type.lower() == "adam":
-            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist = fit_poisson_glm_adam(
+            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_adam(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
@@ -194,6 +196,7 @@ def fit_poisson_glm_best_alpha(
                 patience=patience,
                 tol=tol,
                 device=device,
+                per_target_loss=True,
                 **fit_kwargs
             )
         else:
@@ -206,20 +209,26 @@ def fit_poisson_glm_best_alpha(
             "val_bps_hist": val_bps_hist,
         }
 
-        # Check best validation loss
-        if val_loss_hist and val_loss_hist[-1] < best_val_loss:
-            best_val_loss = val_loss_hist[-1]
-            best_alpha = alpha
-            best_W, best_b = W, b
+        val_losses.append(np.sum(val_loss_per_target))
+        Ws.append(W)
+        bs.append(b)
 
-    val_losses = [history[a]["val_loss_hist"][-1] for a in alpha_grid if history[a]["val_loss_hist"]]
-    if len(val_losses) >= 2:
-        if np.all(np.diff(val_losses) < 0):
-            print("Warning: Validation loss decreases monotonically across the alpha grid. Consider adding smaller alpha values to the grid.")
-        elif np.all(np.diff(val_losses) > 0):
-            print("Warning: Validation loss increases monotonically across the alpha grid. Consider adding larger alpha values to the grid.")
+    val_losses = np.array(val_losses) # (num_alphas, N)
+    # check if losses are monotonically increasing or decreaasing
+    lossdiff = np.diff(val_losses)
+    decreasing = np.all(lossdiff < 0)
+    increasing = np.all(lossdiff > 0)
 
-    print(f"\nBest alpha selected: {best_alpha} with val loss {best_val_loss:.5e}")
+    if np.any(decreasing):
+        print(f'WARNING: Validation loss decreases monotonically across the alpha grid. Consider adding larger alpha values to the grid.')
+    if np.any(increasing):
+        print(f'WARNING: Validation loss increases monotonically across the alpha grid. Consider adding smaller alpha values to the grid.')
+
+    # compute the best alpha per target
+    best_alpha_idx = np.argmin(val_losses, axis=0)
+    best_alpha = alpha_grid[best_alpha_idx]
+    best_W = Ws[best_alpha_idx]
+    best_b = bs[best_alpha_idx]
 
     return best_W, best_b, best_alpha, history
 
@@ -356,7 +365,7 @@ def fit_poisson_glm_lbfgs(
                     )
                     break
     if epoch == max_epochs - 1:
-        print(f"Warning: Reached max_epochs ({max_epochs}))")
+        print(f"Warning: Reached max_epochs ({max_epochs})")
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
@@ -371,8 +380,9 @@ def fit_poisson_glm_lbfgs(
             val_bps_hist,
         )
     else:
-        train_per_target_loss = _poisson_loss_per_target(W, b, X_train, Y_train, alpha)
-        val_per_target_loss = _poisson_loss_per_target(W, b, X_val, Y_val, alpha) if has_val else None
+        # these losses should NOT include the alpha penalty, we just want the data likelihood
+        train_per_target_loss = _poisson_loss_per_target(W, b, X_train, Y_train,)
+        val_per_target_loss = _poisson_loss_per_target(W, b, X_val, Y_val,) if has_val else None
         return (
             Wcpu,
             bcpu,
@@ -520,7 +530,7 @@ def fit_poisson_glm_adam(
                     )
                     break
     if epoch == max_epochs - 1:
-        print(f"Warning: Reached max_epochs ({max_epochs}))")
+        print(f"Warning: Reached max_epochs ({max_epochs})")
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
@@ -536,8 +546,8 @@ def fit_poisson_glm_adam(
             val_bps_hist,
         )
     else:
-        train_per_target_loss = _poisson_loss_per_target(W, b, X_train_cpu.to(device), Y_train_cpu.to(device), alpha)
-        val_per_target_loss = _poisson_loss_per_target(W, b, X_val_cpu.to(device), Y_val_cpu.to(device), alpha) if has_val else None
+        train_per_target_loss = _poisson_loss_per_target(W, b, X_train_cpu.to(device), Y_train_cpu.to(device))
+        val_per_target_loss = _poisson_loss_per_target(W, b, X_val_cpu.to(device), Y_val_cpu.to(device)) if has_val else None
         return (
             Wcpu,
             bcpu,
@@ -604,19 +614,29 @@ def _initialize_params(p, N, mean_rates, device):
     b = torch.log(mean_rates + 1e-8).to(device).requires_grad_()
     return W, b
 
-def _poisson_loss(W, b, X, Y, alpha):
+def _poisson_loss(W, b, X, Y, alpha=None):
     eta = torch.clamp(X @ W + b, max=CLAMP, min=-CLAMP)
     exp_eta = torch.exp(eta)
     # apply alpha per target
-    return torch.sum(exp_eta - Y * eta) + torch.sum(alpha * torch.sum(W**2, dim=0))
+    if alpha is not None:
+        # with penalty (used for fitting)
+        return torch.sum(exp_eta - Y * eta) + torch.sum(alpha * torch.sum(W**2, dim=0))
+    else:
+        # raw nll
+        return torch.sum(exp_eta - Y * eta)
 
-def _poisson_loss_per_target(W, b, X, Y, alpha):
+def _poisson_loss_per_target(W, b, X, Y, alpha=None):
     eta = X @ W + b                  # (T, N)
     exp_eta = torch.exp(eta)         # (T, N)
     data_loss = torch.sum(exp_eta - Y * eta, dim=0)
-    l2_per_target = torch.sum(W**2, dim=0)
-    reg_loss = alpha * l2_per_target
-    return data_loss + reg_loss
+    if alpha is None:
+        # raw nll
+        return data_loss
+    else:
+        # with penalty (used for fitting)
+        l2_per_target = torch.sum(W**2, dim=0)
+        reg_loss = alpha * l2_per_target
+        return data_loss + reg_loss
     
 
 #def _poisson_deviance_loss(W, b, X, Y, alpha):
