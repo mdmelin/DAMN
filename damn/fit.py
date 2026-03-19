@@ -25,6 +25,106 @@ Author: Max Melin, 2026
 import torch 
 import numpy as np
 
+CLAMP = 10 # to prevent exploding gradients
+
+def fit_poisson_glm_best_alpha_per_target(
+    X,
+    Y,
+    optimizer_type="lbfgs",         # "lbfgs" or "adam"
+    alpha_grid=None,                # list or array of candidate alphas
+    max_epochs=100,
+    val_fraction=0.1,
+    early_stopping='train',
+    patience=10,
+    tol=1e-4,
+    device=None,
+    **fit_kwargs                    # extra kwargs to pass to the optimizer-specific fit function
+):
+    """
+    Fit a Poisson GLM using either LBFGS or Adam and select the best alpha
+    based on validation loss. Unlike fit_poisson_glm_best_alpha(), this function
+    will find an array of best alphas, one per each target in the regrssion.
+
+    Returns:
+        best_W, best_b: parameters for best alpha
+        best_alpha: selected alphas
+        history: dict mapping alpha -> (train_loss_hist, val_loss_hist)
+    """
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    assert val_fraction > 0, "val_fraction must be > 0 to select best alpha based on validation loss"
+
+    if alpha_grid is None:
+        alpha_grid = np.logspace(-3, 3, 7)
+
+    best_alpha = None
+    Ws, bs, val_losses = [],[],[]
+    history = {}
+
+    for alpha in alpha_grid:
+        print(f"\n--- Trying alpha = {alpha} ---")
+
+        if optimizer_type.lower() == "lbfgs":
+            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_lbfgs(
+                X, Y,
+                alpha=alpha,
+                max_epochs=max_epochs,
+                val_fraction=val_fraction,
+                early_stopping=early_stopping,
+                patience=patience,
+                tol=tol,
+                device=device,
+                per_target_loss=True,
+                **fit_kwargs
+            )
+        elif optimizer_type.lower() == "adam":
+            W, b, train_loss_hist, val_loss_hist, train_bps_hist, val_bps_hist, train_loss_per_target, val_loss_per_target = fit_poisson_glm_adam(
+                X, Y,
+                alpha=alpha,
+                max_epochs=max_epochs,
+                val_fraction=val_fraction,
+                early_stopping=early_stopping,
+                patience=patience,
+                tol=tol,
+                device=device,
+                per_target_loss=True,
+                **fit_kwargs
+            )
+        else:
+            raise ValueError("optimizer_type must be 'lbfgs' or 'adam'")
+
+        history[alpha] = {
+            "train_loss_hist": train_loss_hist,
+            "val_loss_hist": val_loss_hist,
+            "train_bps_hist": train_bps_hist,
+            "val_bps_hist": val_bps_hist,
+        }
+
+        val_losses.append(val_loss_per_target)
+        Ws.append(W)
+        bs.append(b)
+
+    val_losses = np.array(val_losses) # (num_alphas, N)
+    # check if losses are monotonically increasing or decreaasing
+    lossdiff = np.diff(val_losses, axis=0) 
+    decreasing = np.all(lossdiff < 0, axis=0)
+    increasing = np.all(lossdiff > 0, axis=0)
+
+    if np.any(decreasing):
+        print(f'WARNING: Validation loss decreases monotonically across the alpha grid for targets {np.where(decreasing)[0]}. Consider adding smaller alpha values to the grid.')
+    if np.any(increasing):
+        print(f'WARNING: Validation loss increases monotonically across the alpha grid for targets {np.where(increasing)[0]}. Consider adding larger alpha values to the grid.')
+        
+    # compute the best alpha per target
+    best_alpha_idx = np.argmin(val_losses, axis=0)
+    best_alpha = np.array(alpha_grid)[best_alpha_idx]
+    best_W = np.stack([Ws[ind][:,i] for i,ind in enumerate(best_alpha_idx)])
+    best_b = np.stack([bs[ind][i] for i,ind in enumerate(best_alpha_idx)])
+
+    return best_W, best_b, best_alpha, history
+
 def fit_poisson_glm_best_alpha(
     X,
     Y,
@@ -127,7 +227,7 @@ def fit_poisson_glm_lbfgs(
     max_epochs=100,
     lbfgs_max_iter=200,
     line_search_fn="strong_wolfe",
-    history_size=100,
+    history_size=300,
     val_fraction=0.0,
     early_stopping=None, # 'train' or 'val' or None
     patience=10,
@@ -135,6 +235,7 @@ def fit_poisson_glm_lbfgs(
     print_every=1,
     seed=None,
     device=None,
+    per_target_loss=False
 ):
 
     if device is None:
@@ -149,6 +250,10 @@ def fit_poisson_glm_lbfgs(
 
     X_train = torch.as_tensor(X_train, dtype=torch.float32).to(device)
     Y_train = torch.as_tensor(Y_train, dtype=torch.float32).to(device)
+
+    # add a dimension and transpose alpha so it can be broadcasted to W (for alpha-per-target fitting)
+    alpha = np.expand_dims(alpha, axis=0)
+    alpha = torch.tensor(alpha, dtype=torch.float32).to(device)
 
     if has_val:
         X_val = torch.as_tensor(X_val, dtype=torch.float32).to(device)
@@ -179,6 +284,8 @@ def fit_poisson_glm_lbfgs(
             optimizer.zero_grad(set_to_none=True)
             loss = _poisson_loss(W, b, X_train, Y_train, alpha)
             loss.backward()
+            # Clip gradients here
+            #torch.nn.utils.clip_grad_norm_([W, b], max_norm=5)  # adjust max_norm as needed
             return loss
 
         optimizer.step(closure)
@@ -244,15 +351,28 @@ def fit_poisson_glm_lbfgs(
     bcpu = b.detach().cpu().numpy()
 
     torch.cuda.empty_cache()
-
-    return (
-        Wcpu,
-        bcpu,
-        train_loss_hist,
-        val_loss_hist,
-        train_bps_hist,
-        val_bps_hist,
-    )
+    if not per_target_loss:
+        return (
+            Wcpu,
+            bcpu,
+            train_loss_hist,
+            val_loss_hist,
+            train_bps_hist,
+            val_bps_hist,
+        )
+    else:
+        train_per_target_loss = _poisson_loss_per_target(W, b, X_train, Y_train, alpha)
+        val_per_target_loss = _poisson_loss_per_target(W, b, X_val, Y_val, alpha) if has_val else None
+        return (
+            Wcpu,
+            bcpu,
+            train_loss_hist,
+            val_loss_hist,
+            train_bps_hist,
+            val_bps_hist,
+            train_per_target_loss.detach().cpu().numpy(),
+            val_per_target_loss.detach().cpu().numpy() if has_val else None
+        )
 
 # ============================================================
 # -------------------- Adam Optimizer ------------------------
@@ -273,6 +393,7 @@ def fit_poisson_glm_adam(
     seed=None,
     device=None,
     eval_batch_size=None,
+    per_target_loss=False
 ):
 
     if device is None:
@@ -289,6 +410,10 @@ def fit_poisson_glm_adam(
     #Y_train_cpu = torch.as_tensor(Y_train, dtype=torch.float32)
     X_train_cpu = torch.as_tensor(X_train, dtype=torch.float32).pin_memory()
     Y_train_cpu = torch.as_tensor(Y_train, dtype=torch.float32).pin_memory()
+
+    # add a dimension and transpose alpha so it can be broadcasted to W (for alpha-per-target fitting)
+    alpha = np.expand_dims(alpha, axis=0)
+    alpha = torch.tensor(alpha, dtype=torch.float32).to(device)
 
     if has_val:
         X_val_cpu = torch.as_tensor(X_val, dtype=torch.float32).pin_memory()
@@ -389,14 +514,28 @@ def fit_poisson_glm_adam(
 
     torch.cuda.empty_cache()
 
-    return (
-        Wcpu,
-        bcpu,
-        train_loss_hist,
-        val_loss_hist,
-        train_bps_hist,
-        val_bps_hist,
-    )
+    if not per_target_loss:
+        return (
+            Wcpu,
+            bcpu,
+            train_loss_hist,
+            val_loss_hist,
+            train_bps_hist,
+            val_bps_hist,
+        )
+    else:
+        train_per_target_loss = _poisson_loss_per_target(W, b, X_train_cpu.to(device), Y_train_cpu.to(device), alpha)
+        val_per_target_loss = _poisson_loss_per_target(W, b, X_val_cpu.to(device), Y_val_cpu.to(device), alpha) if has_val else None
+        return (
+            Wcpu,
+            bcpu,
+            train_loss_hist,
+            val_loss_hist,
+            train_bps_hist,
+            val_bps_hist,
+            train_per_target_loss.detach().cpu().numpy(),
+            val_per_target_loss.detach().cpu().numpy() if has_val else None
+        )
 
 
 
@@ -445,22 +584,32 @@ def _initialize_params(p, N, mean_rates, device):
     return W, b
 
 def _poisson_loss(W, b, X, Y, alpha):
-    eta = torch.clamp(X @ W + b, max=20)
+    eta = torch.clamp(X @ W + b, max=CLAMP, min=-CLAMP)
     exp_eta = torch.exp(eta)
-    return torch.sum(exp_eta - Y * eta) + alpha * torch.sum(W**2)
+    # apply alpha per target
+    return torch.sum(exp_eta - Y * eta) + torch.sum(alpha * torch.sum(W**2, dim=0))
 
-def _poisson_deviance_loss(W, b, X, Y, alpha):
-    """
-    Poisson deviance loss with L2 regularization.
-    Loss is normalized by number of samples, but 
-    the gradient is more complex to compute.
-    """
-    N = X.shape[0]
-    eta = torch.clamp(X @ W + b, max=20)
-    mu = torch.exp(eta)
-    # Poisson deviance per sample
-    deviance = 2 * (Y * (torch.log((Y + 1e-8) / mu) - 1) + mu)
-    return torch.sum(deviance) / N + alpha * torch.sum(W**2)
+def _poisson_loss_per_target(W, b, X, Y, alpha):
+    eta = X @ W + b                  # (T, N)
+    exp_eta = torch.exp(eta)         # (T, N)
+    data_loss = torch.sum(exp_eta - Y * eta, dim=0)
+    l2_per_target = torch.sum(W**2, dim=0)
+    reg_loss = alpha * l2_per_target
+    return data_loss + reg_loss
+    
+
+#def _poisson_deviance_loss(W, b, X, Y, alpha):
+#    """
+#    Poisson deviance loss with L2 regularization.
+#    Loss is normalized by number of samples, but 
+#    the gradient is more complex to compute.
+#    """
+#    N = X.shape[0]
+#    eta = torch.clamp(X @ W + b, max=20)
+#    mu = torch.exp(eta)
+#    # Poisson deviance per sample
+#    deviance = 2 * (Y * (torch.log((Y + 1e-8) / mu) - 1) + mu)
+#    return torch.sum(deviance) / N + alpha * torch.sum(W**2)
 
 
 def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
@@ -482,7 +631,7 @@ def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
             Yb = Y_cpu[start:end].to(device, non_blocking=True)
     
             # Predicted log-rate and rate
-            eta = torch.clamp(Xb @ W + b, max=12)
+            eta = torch.clamp(Xb @ W + b, max=CLAMP, min=-CLAMP)
             mu = torch.exp(eta)
     
             # Poisson deviance / log-likelihood terms
@@ -493,8 +642,8 @@ def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
     
             del Xb, Yb, eta, mu
     
-        # Add L2 penalty
-        total_loss += alpha * torch.sum(W**2)
+        # Add L2 penalty (alpha per target optional)
+        total_loss += torch.sum(alpha * torch.sum(W**2, dim=0))
     
         # Bits per spike, averaged over all spikes, independent of batch size
         bps = (logL_model - logL_null) / (total_spikes * log2)
@@ -509,7 +658,7 @@ def _evaluate_full_gpu(W, b, X, Y, alpha):
     with torch.no_grad():
         loss = _poisson_loss(W, b, X, Y, alpha)
 
-        eta = torch.clamp(X @ W + b, max=20)
+        eta = torch.clamp(X @ W + b, min=-CLAMP, max=CLAMP)
         exp_eta = torch.exp(eta)
 
         mean_rate = torch.mean(Y, dim=0, keepdim=True)
