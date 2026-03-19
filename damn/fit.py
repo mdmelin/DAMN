@@ -753,7 +753,8 @@ def choose_optimizer(X, Y, buffer_factor=1.2,):
             batch_size = int((gpu_mem / buffer_factor - batch_W_mem - batch_b_mem) / (p * xbytes + N * ybytes))
             return "adam", batch_size
     else:
-        raise RuntimeError("No GPU available.")
+        print('WARNING: NO GPU AVAILIBLE')
+        return None, None
         # CPU fallback: assume ~16GB available, same logic
         cpu_mem_limit = 16 * 1024**3
         if total_mem_needed < cpu_mem_limit:

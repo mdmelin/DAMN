@@ -1,5 +1,4 @@
 import numpy as np
-from sklearn.calibration import Hidden
 
 # =========================
 # Design matrix (houses Regressor objects)
