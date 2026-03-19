@@ -12,13 +12,11 @@ In general, there are a couple ways to get solutions to converge:
 - If you don't care about cross-validated performance, set val_fraction=0 and early_stopping='train'. This will just monitor the training loss and stop when it plateaus.
 - If you care about cross-validated performance:
     - set val_fraction to something like 0.1 to hold out a validation set, and set early_stopping='val' to monitor the validation loss for early stopping.
-        - This way is quickest in practice because it will stop as soon as the validation loss plateaus, but you are not guarunteed the optimal convergent solution given the supplied alpha penalty
-        - But you will want to monitor this closely and likely reduce 'patience' to stop training before val loss tails off too much.
+        - This way is quickest in practice because it will stop as soon as the validation loss plateaus, but you are not guaranteed the optimal convergent solution given the supplied alpha penalty
+        - You will want to monitor this closely and likely reduce 'patience' to stop training before val loss tails off too much.
     - Alternatively, you can set val_fraction > 0 but early_stopping='train' to monitor the training loss for early stopping, while still using the validation scores to select the best alpha.
-        - fit_poisson_glm_best alpha does this for you. It's somewhat analogous to sklearn.linear_model.RidgeCV, 
+        - fit_poisson_glm_best_alpha and fit_poisson_glm_best_alpha_per_target both can do this for you. It's somewhat analogous to sklearn.linear_model.RidgeCV, 
           where the optimal solution should be found given alpha and the training set, and then we evaluate performance on the val set.
-
-# TODO: hybrid optimizer that starts with Adam and finishes with LBFGS
 
 Author: Max Melin, 2026
 """
@@ -35,6 +33,7 @@ def fit_poisson_glm_best_alpha_per_target(
     max_epochs=100,
     val_fraction=0.1,
     early_stopping='train',
+    warm_start=False,
     patience=10,
     tol=1e-4,
     device=None,
@@ -65,7 +64,7 @@ def fit_poisson_glm_best_alpha_per_target(
     best_alpha = None
     Ws, bs, val_losses = [],[],[]
     history = {}
-
+    W, b = None, None # for warm starting across alphas
     for alpha in alpha_grid:
         print(f"\n--- Trying alpha = {alpha} ---")
 
@@ -81,6 +80,8 @@ def fit_poisson_glm_best_alpha_per_target(
                 tol=tol,
                 device=device,
                 per_target_loss=True,
+                W_init=W,
+                b_init=b,
                 **fit_kwargs
             )
         elif optimizer_type.lower() == "adam":
@@ -95,6 +96,8 @@ def fit_poisson_glm_best_alpha_per_target(
                 tol=tol,
                 device=device,
                 per_target_loss=True,
+                W_init=W,
+                b_init=b,
                 **fit_kwargs
             )
         else:
@@ -110,6 +113,9 @@ def fit_poisson_glm_best_alpha_per_target(
         val_losses.append(val_loss_per_target)
         Ws.append(W)
         bs.append(b)
+        if not warm_start:
+            # don't warm start across alphas, re-initialize W and b for each alpha
+            W, b = None, None
 
     val_losses = np.array(val_losses) # (num_alphas, N)
     # check if losses are monotonically increasing or decreaasing
@@ -141,6 +147,7 @@ def fit_poisson_glm_best_alpha(
     patience=10,
     tol=1e-4,
     device=None,
+    warm_start=False,
     **fit_kwargs                    # extra kwargs to pass to the optimizer-specific fit function
 ):
     """
@@ -167,6 +174,7 @@ def fit_poisson_glm_best_alpha(
     best_alpha = None
     Ws, bs, val_losses = [],[],[]
     history = {}
+    W, b = None, None  # for warm starting across alphas
 
     for alpha in alpha_grid:
         print(f"\n--- Trying alpha = {alpha} ---")
@@ -183,6 +191,8 @@ def fit_poisson_glm_best_alpha(
                 tol=tol,
                 device=device,
                 per_target_loss=True,
+                W_init=W,
+                b_init=b,
                 **fit_kwargs
             )
         elif optimizer_type.lower() == "adam":
@@ -197,6 +207,8 @@ def fit_poisson_glm_best_alpha(
                 tol=tol,
                 device=device,
                 per_target_loss=True,
+                W_init=W,
+                b_init=b,
                 **fit_kwargs
             )
         else:
@@ -212,6 +224,9 @@ def fit_poisson_glm_best_alpha(
         val_losses.append(np.sum(val_loss_per_target))
         Ws.append(W)
         bs.append(b)
+        if not warm_start:
+            # don't store solutions for warm starting across alphas, re-initialize W and b for each alpha
+            W, b = None, None
 
     val_losses = np.array(val_losses) # (num_alphas, N)
     # check if losses are monotonically increasing or decreaasing
@@ -253,7 +268,9 @@ def fit_poisson_glm_lbfgs(
     seed=None,
     device=None,
     per_target_loss=False,
-    val_inds=None
+    val_inds=None,
+    W_init=None,
+    b_init=None
 ):
 
     if device is None:
@@ -280,8 +297,20 @@ def fit_poisson_glm_lbfgs(
     T_train, p = X_train.shape
     N = Y_train.shape[1]
 
-    mean_rates = torch.mean(Y_train, dim=0)
-    W, b = _initialize_params(p, N, mean_rates, device)
+    if W_init is None and b_init is None:
+        mean_rates = torch.mean(Y_train, dim=0)
+        W, b = _initialize_params(p, N, mean_rates, device)
+    else:
+        # warm start from previous solution
+        W = torch.as_tensor(W_init, dtype=torch.float32, device=device)
+        b = torch.as_tensor(b_init, dtype=torch.float32, device=device)
+        # add small noise safely
+        with torch.no_grad():
+            W += .01 * torch.randn_like(W)
+            b += .01 * torch.randn_like(b)
+        W.requires_grad_()
+        b.requires_grad_()
+
 
     optimizer = torch.optim.LBFGS(
         [W, b],
@@ -414,7 +443,9 @@ def fit_poisson_glm_adam(
     device=None,
     eval_batch_size=None,
     per_target_loss=False,
-    val_inds=None
+    val_inds=None,
+    W_init=None,
+    b_init=None
 ):
 
     if device is None:
@@ -442,8 +473,21 @@ def fit_poisson_glm_adam(
 
     T_train, p = X_train_cpu.shape
     N = Y_train_cpu.shape[1]
-    mean_rates = torch.mean(Y_train_cpu, dim=0)
-    W, b = _initialize_params(p, N, mean_rates, device)
+
+    if W_init is None and b_init is None:
+        mean_rates = torch.mean(Y_train_cpu, dim=0)
+        W, b = _initialize_params(p, N, mean_rates, device)
+    else:
+        # warm start from previous solution
+        W = torch.as_tensor(W_init, dtype=torch.float32, device=device)
+        b = torch.as_tensor(b_init, dtype=torch.float32, device=device)
+        # add small noise safely
+        with torch.no_grad():
+            W += .01 * torch.randn_like(W)
+            b += .01 * torch.randn_like(b)
+        W.requires_grad_()
+        b.requires_grad_()
+
 
     optimizer = torch.optim.Adam([W, b], lr=lr)
 
