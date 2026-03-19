@@ -29,7 +29,7 @@ def gaussian_smooth(pre_s, post_s, binwidth_s):
     basis = np.exp(-0.5 * (t / sigma) ** 2)
     basis /= basis.sum()  # Normalize
     basis = basis.reshape(-1, 1)
-    return basis, t
+    return np.array(basis.T)
 
 def polynomial(degree):
     raise NotImplementedError("Polynomial basis function not implemented here. You can achieve the same effect by adding another regressor with your regressor multiplied by the desired polynomial degree.")
@@ -100,6 +100,10 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
     """
     # Time axis
     t, edges,_ = construct_timebins(pre_s, post_s, binwidth_s)
+    # compute the number of bins to shift from pre and post s, assuming the kernel is currently centered on t=0
+    kernelwidth = (post_s - pre_s) 
+    binshift = int(np.round(kernelwidth / binwidth_s))
+    
     T = len(t)
 
     if log_scale:
@@ -135,7 +139,9 @@ def raised_cosine_basis(n_funcs, pre_s, post_s, binwidth_s, log_scale=False):
             basis[:, k] = 0.5 * (1 + np.cos(np.clip(x, -np.pi, np.pi)))
             basis[np.abs(x) >= np.pi, k] = 0.0
 
-    return basis,t
+    # shift and pad the basis based on the known index of time zero (t0)
+    basis = _shift_and_pad_basis(basis, shift_bins=binshift)
+    return np.array(basis.T)
 
 def gaussian_basis(n_funcs, pre_s, post_s, binwidth_s, sigma=None):
     """
@@ -269,9 +275,20 @@ def radial_basis():
 
 def spatial_gaussian_basis():
     raise NotImplementedError("Spatial Gaussian basis functions not implemented yet.")
+
 ##########################################
 #### Helper funcitons to create bases ####
 ##########################################
+
+def _shift_and_pad_basis(basis, shift_bins):
+    # shift the basis by shift_bins, padding the opposite side with zeros
+    if shift_bins > 0:
+        shifted_basis = np.pad(basis, ((shift_bins, 0), (0, 0)), mode='constant')
+    elif shift_bins < 0:
+        shifted_basis = np.pad(basis, ((0, -shift_bins), (0, 0)), mode='constant')
+    else:
+        shifted_basis = basis
+    return shifted_basis
 
 def _make_morlet_wavelet(frequency, srate, n_cycles=7):
     """
