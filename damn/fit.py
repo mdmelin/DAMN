@@ -25,7 +25,7 @@ Author: Max Melin, 2026
 import torch 
 import numpy as np
 
-CLAMP = 10 # to prevent exploding gradients
+CLAMP = 8 # to prevent exploding gradients
 
 def fit_poisson_glm_best_alpha_per_target(
     X,
@@ -55,6 +55,8 @@ def fit_poisson_glm_best_alpha_per_target(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
     assert val_fraction > 0, "val_fraction must be > 0 to select best alpha based on validation loss"
+    # compute train inds and val inds from val_fraction
+    val_inds = np.random.choice(X.shape[0], size=int(X.shape[0] * val_fraction), replace=False)
 
     if alpha_grid is None:
         alpha_grid = np.logspace(-3, 3, 7)
@@ -71,7 +73,8 @@ def fit_poisson_glm_best_alpha_per_target(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
-                val_fraction=val_fraction,
+                #val_fraction=val_fraction,
+                val_inds=val_inds,
                 early_stopping=early_stopping,
                 patience=patience,
                 tol=tol,
@@ -84,7 +87,8 @@ def fit_poisson_glm_best_alpha_per_target(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
-                val_fraction=val_fraction,
+                #val_fraction=val_fraction,
+                val_inds=val_inds,
                 early_stopping=early_stopping,
                 patience=patience,
                 tol=tol,
@@ -152,6 +156,8 @@ def fit_poisson_glm_best_alpha(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
     assert val_fraction > 0, "val_fraction must be > 0 to select best alpha based on validation loss"
+    # compute train inds and val inds from val_fraction
+    val_inds = np.random.choice(X.shape[0], size=int(X.shape[0] * val_fraction), replace=False)
 
     if alpha_grid is None:
         alpha_grid = np.logspace(-3, 3, 7)
@@ -169,7 +175,8 @@ def fit_poisson_glm_best_alpha(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
-                val_fraction=val_fraction,
+                #val_fraction=val_fraction,
+                val_inds=val_inds,
                 early_stopping=early_stopping,
                 patience=patience,
                 tol=tol,
@@ -181,7 +188,8 @@ def fit_poisson_glm_best_alpha(
                 X, Y,
                 alpha=alpha,
                 max_epochs=max_epochs,
-                val_fraction=val_fraction,
+                #val_fraction=val_fraction,
+                val_inds=val_inds,
                 early_stopping=early_stopping,
                 patience=patience,
                 tol=tol,
@@ -227,7 +235,7 @@ def fit_poisson_glm_lbfgs(
     max_epochs=100,
     lbfgs_max_iter=200,
     line_search_fn="strong_wolfe",
-    history_size=300,
+    history_size=100,
     val_fraction=0.0,
     early_stopping=None, # 'train' or 'val' or None
     patience=10,
@@ -235,7 +243,8 @@ def fit_poisson_glm_lbfgs(
     print_every=1,
     seed=None,
     device=None,
-    per_target_loss=False
+    per_target_loss=False,
+    val_inds=None
 ):
 
     if device is None:
@@ -245,7 +254,7 @@ def fit_poisson_glm_lbfgs(
         torch.cuda.empty_cache()
 
     X_train, Y_train, X_val, Y_val, has_val = _prepare_data(
-        X, Y, val_fraction, seed
+        X, Y, val_fraction, val_inds, seed
     )
 
     X_train = torch.as_tensor(X_train, dtype=torch.float32).to(device)
@@ -346,7 +355,8 @@ def fit_poisson_glm_lbfgs(
                         f"for {patience} consecutive epochs."
                     )
                     break
-
+    if epoch == max_epochs - 1:
+        print(f"Warning: Reached max_epochs ({max_epochs}))")
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
@@ -393,7 +403,8 @@ def fit_poisson_glm_adam(
     seed=None,
     device=None,
     eval_batch_size=None,
-    per_target_loss=False
+    per_target_loss=False,
+    val_inds=None
 ):
 
     if device is None:
@@ -403,7 +414,7 @@ def fit_poisson_glm_adam(
         torch.cuda.empty_cache()
 
     X_train, Y_train, X_val, Y_val, has_val = _prepare_data(
-        X, Y, val_fraction, seed
+        X, Y, val_fraction, val_inds, seed
     )
 
     #$X_train_cpu = torch.as_tensor(X_train, dtype=torch.float32)
@@ -508,7 +519,8 @@ def fit_poisson_glm_adam(
                         f"for {patience} consecutive epochs."
                     )
                     break
-
+    if epoch == max_epochs - 1:
+        print(f"Warning: Reached max_epochs ({max_epochs}))")
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
@@ -555,22 +567,31 @@ def _check_for_bad_convergence(loss_hist, tol=1e-4, patience=5):
             "Consider increasing max_epochs or adjusting optimizer parameters."
         )
 
-def _prepare_data(X, Y, val_fraction, seed):
-    rng = np.random.default_rng(seed)
-    T = X.shape[0]
-    idx = np.arange(T)
-    rng.shuffle(idx)
+def _prepare_data(X, Y, val_fraction, val_inds=None, seed=None):
+    if val_inds is not None and val_fraction > 0:
+        raise ValueError("Only one of val_inds or val_fraction should be provided.")
 
-    if val_fraction > 0:
-        split = int(T * (1 - val_fraction))
-        train_idx, val_idx = idx[:split], idx[split:]
-        X_train, Y_train = X[train_idx], Y[train_idx]
-        X_val, Y_val = X[val_idx], Y[val_idx]
+    if val_inds is not None:
+        X_train = X[~val_inds]
+        Y_train = Y[~val_inds]
+        X_val = X[val_inds]
+        Y_val = Y[val_inds]
         has_val = True
     else:
-        X_train, Y_train = X, Y
-        X_val, Y_val = None, None
-        has_val = False
+        rng = np.random.default_rng(seed)
+        T = X.shape[0]
+        idx = np.arange(T)
+        rng.shuffle(idx)
+        if val_fraction > 0:
+            split = int(T * (1 - val_fraction))
+            train_idx, val_idx = idx[:split], idx[split:]
+            X_train, Y_train = X[train_idx], Y[train_idx]
+            X_val, Y_val = X[val_idx], Y[val_idx]
+            has_val = True
+        else:
+            X_train, Y_train = X, Y
+            X_val, Y_val = None, None
+            has_val = False
 
     return X_train, Y_train, X_val, Y_val, has_val
 
