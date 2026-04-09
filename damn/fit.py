@@ -36,7 +36,7 @@ def fit_poisson_glm_best_alpha_per_target(
     early_stopping='train',
     warm_start=False,
     patience=10,
-    tol=1e-8,
+    tol=1e-7,
     device=None,
     **fit_kwargs                    # extra kwargs to pass to the optimizer-specific fit function
 ):
@@ -164,6 +164,8 @@ def fit_poisson_glm_best_alpha(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
+
+    
     assert val_fraction > 0, "val_fraction must be > 0 to select best alpha based on validation loss"
     # compute train inds and val inds from val_fraction
     val_inds = np.random.choice(X.shape[0], size=int(X.shape[0] * val_fraction), replace=False)
@@ -280,6 +282,13 @@ def fit_poisson_glm_lbfgs(
     if device == "cuda":
         torch.cuda.empty_cache()
 
+    # remove X entries if all zero, all nan or all the same, save those inds to put back later
+    bad_cols = np.where(np.all(X == 0, axis=0) | np.all(np.isnan(X), axis=0) | np.all(X == X[0,:], axis=0))[0]
+    good_cols = np.where(~(np.all(X == 0, axis=0) | np.all(np.isnan(X), axis=0) | np.all(X == X[0,:], axis=0)))[0]
+    num_cols = X.shape[1]
+    print(f'Removing {len(bad_cols)} bad columns with all zeros, all nans, or all the same value')
+    X = np.delete(X, bad_cols, axis=1)
+
     X_train, Y_train, X_val, Y_val, has_val = _prepare_data(
         X, Y, val_fraction, val_inds, seed
     )
@@ -300,9 +309,12 @@ def fit_poisson_glm_lbfgs(
 
     if W_init is None and b_init is None:
         mean_rates = torch.mean(Y_train, dim=0)
-        W, b = _initialize_params(p, N, mean_rates, device)
+        W, b = _initialize_params(p, N, mean_rates, device,)
     else:
         # warm start from previous solution
+        if len(bad_cols) > 0:
+            # if we removed bad columns, we need to remove those columns from W_init as well for the warm start
+            W_init = np.delete(W_init, bad_cols, axis=0)
         W = torch.as_tensor(W_init, dtype=torch.float32, device=device)
         b = torch.as_tensor(b_init, dtype=torch.float32, device=device)
         # add small noise safely
@@ -396,11 +408,17 @@ def fit_poisson_glm_lbfgs(
                     break
     if epoch == max_epochs - 1:
         print(f"Warning: Reached max_epochs ({max_epochs})")
+
     Wcpu = W.detach().cpu().numpy()
     bcpu = b.detach().cpu().numpy()
 
     torch.cuda.empty_cache()
     if not per_target_loss:
+        # add back in the bad columns we removed at the beginning, filling with zeros
+        if len(bad_cols) > 0:
+            Wcpu_full = np.zeros((num_cols, N), dtype=Wcpu.dtype)
+            Wcpu_full[good_cols, :] = Wcpu
+            Wcpu = Wcpu_full
         return (
             Wcpu,
             bcpu,
@@ -413,6 +431,12 @@ def fit_poisson_glm_lbfgs(
         # these losses should NOT include the alpha penalty, we just want the data likelihood
         train_per_target_loss = _poisson_loss_per_target(W, b, X_train, Y_train,)
         val_per_target_loss = _poisson_loss_per_target(W, b, X_val, Y_val,) if has_val else None
+
+        if len(bad_cols) > 0:
+            Wcpu_full = np.zeros((num_cols, N), dtype=Wcpu.dtype)
+            Wcpu_full[good_cols, :] = Wcpu
+            Wcpu = Wcpu_full
+
         return (
             Wcpu,
             bcpu,
@@ -658,6 +682,7 @@ def _initialize_params(p, N, mean_rates, device):
     W = torch.randn(p, N, device=device) * 0.01
     W.requires_grad_(True)
     b = torch.log(mean_rates + 1e-8).to(device).requires_grad_()
+    
     return W, b
 
 def _poisson_loss(W, b, X, Y, alpha=None):
