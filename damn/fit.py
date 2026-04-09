@@ -21,6 +21,7 @@ In general, there are a couple ways to get solutions to converge:
 Author: Max Melin, 2026
 """
 import torch 
+import torch.nn.functional as F
 import numpy as np
 
 CLAMP = 8 # to prevent exploding gradients
@@ -30,12 +31,12 @@ def fit_poisson_glm_best_alpha_per_target(
     Y,
     optimizer_type="lbfgs",         # "lbfgs" or "adam"
     alpha_grid=None,                # list or array of candidate alphas
-    max_epochs=100,
+    max_epochs=1000,
     val_fraction=0.1,
     early_stopping='train',
     warm_start=False,
     patience=10,
-    tol=1e-4,
+    tol=1e-8,
     device=None,
     **fit_kwargs                    # extra kwargs to pass to the optimizer-specific fit function
 ):
@@ -256,14 +257,14 @@ def fit_poisson_glm_lbfgs(
     X,
     Y,
     alpha=0.0,
-    max_epochs=100,
-    lbfgs_max_iter=200,
+    max_epochs=1000,
+    lbfgs_max_iter=20,
     line_search_fn="strong_wolfe",
-    history_size=100,
+    history_size=10,
     val_fraction=0.0,
     early_stopping=None, # 'train' or 'val' or None
     patience=10,
-    tol=1e-4,
+    tol=1e-8,
     print_every=1,
     seed=None,
     device=None,
@@ -306,8 +307,8 @@ def fit_poisson_glm_lbfgs(
         b = torch.as_tensor(b_init, dtype=torch.float32, device=device)
         # add small noise safely
         with torch.no_grad():
-            W += .01 * torch.randn_like(W)
-            b += .01 * torch.randn_like(b)
+            W += .0001 * torch.randn_like(W)
+            b += .0001 * torch.randn_like(b)
         W.requires_grad_()
         b.requires_grad_()
 
@@ -653,6 +654,7 @@ def _prepare_data(X, Y, val_fraction, val_inds=None, seed=None):
 def _initialize_params(p, N, mean_rates, device):
     #b = torch.zeros(N, device=device, requires_grad=True)
     #W = 0.01 * torch.randn(p, N, device=device, requires_grad=True)
+    #W = torch.randn(p, N, device=device) * 0.01
     W = torch.randn(p, N, device=device) * 0.01
     W.requires_grad_(True)
     b = torch.log(mean_rates + 1e-8).to(device).requires_grad_()
@@ -660,14 +662,24 @@ def _initialize_params(p, N, mean_rates, device):
 
 def _poisson_loss(W, b, X, Y, alpha=None):
     eta = torch.clamp(X @ W + b, max=CLAMP, min=-CLAMP)
-    exp_eta = torch.exp(eta)
+    #exp_eta = torch.exp(eta)
+    #eta = X @ W + b
     # apply alpha per target
+    data_loss = torch.nn.functional.poisson_nll_loss(
+                                                    input=eta,        # NOTE: log-rate
+                                                    target=Y,
+                                                    log_input=True,
+                                                    full=False,
+                                                    reduction="mean")
+    #data_loss2 = torch.sum(exp_eta - Y * eta)
     if alpha is not None:
         # with penalty (used for fitting)
-        return torch.sum(exp_eta - Y * eta) + torch.sum(alpha * torch.sum(W**2, dim=0))
+        #return torch.sum(exp_eta - Y * eta) + torch.sum(alpha * torch.sum(W**2, dim=0))
+        return data_loss + torch.sum(alpha * torch.sum(W**2, dim=0))
     else:
         # raw nll
-        return torch.sum(exp_eta - Y * eta)
+        #return torch.sum(exp_eta - Y * eta)
+        return data_loss
 
 def _poisson_loss_per_target(W, b, X, Y, alpha=None):
     eta = X @ W + b                  # (T, N)
@@ -701,39 +713,49 @@ def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
     with torch.no_grad():
         log2 = torch.log(torch.tensor(2.0, device=device))
         eps = 1e-12
-    
-        total_loss = 0.0
+
+        total_nll = 0.0
         logL_model = 0.0
         logL_null = 0.0
         total_spikes = 0.0
-    
-        # Compute mean rate of each neuron for null model
+
         mean_rate = torch.mean(Y_cpu, dim=0, keepdim=True).to(device)
-    
+
         for start in range(0, X_cpu.shape[0], eval_batch_size):
             end = min(start + eval_batch_size, X_cpu.shape[0])
+
             Xb = X_cpu[start:end].to(device, non_blocking=True)
             Yb = Y_cpu[start:end].to(device, non_blocking=True)
-    
-            # Predicted log-rate and rate
-            eta = torch.clamp(Xb @ W + b, max=CLAMP, min=-CLAMP)
-            mu = torch.exp(eta)
-    
-            # Poisson deviance / log-likelihood terms
-            total_loss += torch.sum(mu - Yb * eta)
-            logL_model += torch.sum(Yb * eta - mu)
-            logL_null += torch.sum(Yb * torch.log(mean_rate + eps) - mean_rate)
+
+            #eta = Xb @ W + b   # NO clamp
+            eta = torch.clamp(X_cpu @ W + b, min=-CLAMP, max=CLAMP)
+
+            # ✅ PyTorch NLL (correct loss)
+            total_nll += F.poisson_nll_loss(
+                eta, Yb,
+                log_input=True,
+                full=False,
+                reduction="sum"
+            )
+
+            # still need log-likelihood for BPS
+            exp_eta = torch.exp(eta)
+
+            logL_model += torch.sum(Yb * eta - exp_eta)
+            logL_null += torch.sum(
+                Yb * torch.log(mean_rate + eps) - mean_rate
+            )
+
             total_spikes += torch.sum(Yb)
-    
-            del Xb, Yb, eta, mu
-    
-        # Add L2 penalty (alpha per target optional)
-        total_loss += torch.sum(alpha * torch.sum(W**2, dim=0))
-    
-        # Bits per spike, averaged over all spikes, independent of batch size
+
+            del Xb, Yb, eta, exp_eta
+
+        if alpha is not None:
+            total_nll += torch.sum(alpha * torch.sum(W**2, dim=0))
+
         bps = (logL_model - logL_null) / (total_spikes * log2)
-    
-    return total_loss, bps
+
+    return total_nll, bps
 
 
 def _evaluate_full_gpu(W, b, X, Y, alpha):
