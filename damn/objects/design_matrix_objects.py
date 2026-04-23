@@ -1,4 +1,5 @@
 import numpy as np
+import copy
 
 # =========================
 # Design matrix (houses Regressor objects)
@@ -14,14 +15,18 @@ class DesignMatrix:
         self.regressors = {}
         self.hidden_regressors = {}
 
-    def add_regressor(self, regressor):
+    def add_regressor(self, regressor, *, copy_regressor=True):
+            # Keep regressor state matrix-local by default so multiple
+            # DesignMatrix objects can safely share source templates.
+            reg_to_store = copy.deepcopy(regressor) if copy_regressor else regressor
+
             # TODO: add by name and specify the type (Event or Continuous) and parameters (including basis functions)
             # first check if overwriting an existing regressor
-            if regressor.name in self.regressors:
+            if reg_to_store.name in self.regressors:
                 raise ValueError(
-                    f"Regressor with name {regressor.name} already exists"
+                    f"Regressor with name {reg_to_store.name} already exists"
                 )
-            self.regressors[regressor.name] = regressor
+            self.regressors[reg_to_store.name] = reg_to_store
     
     def remove_regressor(self, name):
         if name not in self.regressors:
