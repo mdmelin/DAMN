@@ -463,7 +463,7 @@ def fit_poisson_glm_adam(
     early_stopping=None, # 'train' or 'val' or None
     patience=10,
     tol=1e-4,
-    print_every=1,
+    print_every=5,
     seed=None,
     device=None,
     eval_batch_size=None,
@@ -483,10 +483,9 @@ def fit_poisson_glm_adam(
         X, Y, val_fraction, val_inds, seed
     )
 
-    #$X_train_cpu = torch.as_tensor(X_train, dtype=torch.float32)
-    #Y_train_cpu = torch.as_tensor(Y_train, dtype=torch.float32)
-    X_train_cpu = torch.as_tensor(X_train, dtype=torch.float32).pin_memory()
-    Y_train_cpu = torch.as_tensor(Y_train, dtype=torch.float32).pin_memory()
+
+    X_train_cpu = torch.from_numpy(X_train).float().pin_memory()
+    Y_train_cpu = torch.from_numpy(Y_train).float().pin_memory()
 
     # add a dimension and transpose alpha so it can be broadcasted to W (for alpha-per-target fitting)
     alpha = np.expand_dims(alpha, axis=0)
@@ -542,19 +541,21 @@ def fit_poisson_glm_adam(
 
             del Xb, Yb, loss
 
-        train_loss, train_bps = _evaluate_streamed(
-            W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size
-        )
-
-        train_loss_hist.append(train_loss.item())
-        train_bps_hist.append(train_bps.item())
-
-        if has_val:
-            val_loss, val_bps = _evaluate_streamed(
-                W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size
+        if epoch % print_every == 0 or epoch == max_epochs - 1:
+            train_loss, train_bps = _evaluate_streamed(
+                W, b, X_train_cpu, Y_train_cpu, alpha, device, eval_batch_size
             )
-            val_loss_hist.append(val_loss.item())
-            val_bps_hist.append(val_bps.item())
+
+            train_loss_hist.append(train_loss.item())
+            train_bps_hist.append(train_bps.item())
+
+            if has_val:
+                val_loss, val_bps = _evaluate_streamed(
+                    W, b, X_val_cpu, Y_val_cpu, alpha, device, eval_batch_size
+                )
+                val_loss_hist.append(val_loss.item())
+                val_bps_hist.append(val_bps.item())
+
         if has_val:
             _print_progress(
                 epoch,
@@ -753,7 +754,7 @@ def _evaluate_streamed(W, b, X_cpu, Y_cpu, alpha, device, eval_batch_size):
             Yb = Y_cpu[start:end].to(device, non_blocking=True)
 
             #eta = Xb @ W + b   # NO clamp
-            eta = torch.clamp(X_cpu @ W + b, min=-CLAMP, max=CLAMP)
+            eta = torch.clamp(Xb @ W + b, min=-CLAMP, max=CLAMP)
 
             # ✅ PyTorch NLL (correct loss)
             total_nll += F.poisson_nll_loss(
