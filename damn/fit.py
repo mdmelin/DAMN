@@ -132,7 +132,7 @@ def fit_poisson_glm_best_alpha_per_target(
     # compute the best alpha per target
     best_alpha_idx = np.argmin(val_losses, axis=0)
     best_alpha = alpha_grid[best_alpha_idx]
-    best_W = np.stack([Ws[ind][:,i] for i,ind in enumerate(best_alpha_idx)])
+    best_W = np.stack([Ws[ind][:,i] for i,ind in enumerate(best_alpha_idx)]).T
     best_b = np.stack([bs[ind][i] for i,ind in enumerate(best_alpha_idx)])
 
     return best_W, best_b, best_alpha, history
